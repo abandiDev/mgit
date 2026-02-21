@@ -25,13 +25,14 @@ def cli():
 
 
 # Import and register subcommands
-from mgit.cli.workspace import init  # noqa: E402
+from mgit.cli.workspace import init, remove  # noqa: E402
 from mgit.cli.repo import repo  # noqa: E402
 from mgit.cli.feature import feature  # noqa: E402
 from mgit.cli.context import context  # noqa: E402
 from mgit.cli.bulk import status, pull, push, commit, exec_cmd  # noqa: E402
 
 main.add_command(init)
+main.add_command(remove)
 main.add_command(repo)
 main.add_command(feature)
 main.add_command(context)

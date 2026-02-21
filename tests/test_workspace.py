@@ -135,6 +135,45 @@ class TestWorkspaceRepoManagement:
             assert ws2.repos[name].default_branch == ws.repos[name].default_branch
 
 
+class TestWorkspaceRemove:
+    def test_remove_deletes_mgit_dir(self, initialized_workspace):
+        ws = initialized_workspace
+        assert ws.mgit_dir.exists()
+        ws.remove()
+        assert not ws.mgit_dir.exists()
+
+    def test_remove_deletes_agent_md(self, tmp_workspace):
+        ws, _ = Workspace.init(tmp_workspace)
+        agent_md = tmp_workspace / "AGENT.md"
+        assert agent_md.exists()
+        ws.remove()
+        assert not agent_md.exists()
+
+    def test_remove_leaves_repos_untouched(self, initialized_workspace):
+        ws = initialized_workspace
+        repo_a = ws.root / "repo-a"
+        assert repo_a.is_dir()
+        ws.remove()
+        assert repo_a.is_dir()
+
+    def test_remove_idempotent_on_agent_md(self, initialized_workspace):
+        ws = initialized_workspace
+        # AGENT.md may not exist if workspace was created by fixture (no init)
+        agent_md = ws.root / "AGENT.md"
+        if agent_md.exists():
+            agent_md.unlink()
+        # Should not raise
+        ws.remove()
+        assert not ws.mgit_dir.exists()
+
+    def test_find_raises_after_remove(self, initialized_workspace):
+        ws = initialized_workspace
+        root = ws.root
+        ws.remove()
+        with pytest.raises(WorkspaceNotFoundError):
+            Workspace.find(root)
+
+
 class TestActiveFeature:
     def test_get_active_feature_none(self, initialized_workspace):
         ws = initialized_workspace

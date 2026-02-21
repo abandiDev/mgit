@@ -1,11 +1,11 @@
-"""CLI command: mgit init."""
+"""CLI commands: mgit init, mgit remove."""
 
 from pathlib import Path
 
 import click
 
 from mgit.core.workspace import Workspace
-from mgit.utils.errors import WorkspaceExistsError
+from mgit.utils.errors import WorkspaceExistsError, WorkspaceNotFoundError
 
 
 @click.command()
@@ -90,3 +90,28 @@ def _interactive_select(ws: Workspace, repos):
 
     ws.save()
     click.echo(f"Registered {added} repos.")
+
+
+@click.command()
+@click.option("--force", is_flag=True, help="Skip confirmation prompt.")
+def remove(force):
+    """Remove the mgit workspace (deletes .mgit/ and AGENT.md).
+
+    Repos and other files are left untouched.
+    """
+    try:
+        ws = Workspace.find()
+    except WorkspaceNotFoundError as e:
+        raise click.ClickException(str(e))
+
+    if not force:
+        click.echo(f"This will remove the mgit workspace at {ws.root}")
+        click.echo("  - Deletes .mgit/ (config, features, active state)")
+        click.echo("  - Deletes AGENT.md")
+        click.echo("  - Repos and other files are NOT touched")
+        if not click.confirm("Continue?"):
+            click.echo("Aborted.")
+            return
+
+    ws.remove()
+    click.echo(f"Removed mgit workspace from {ws.root}.")

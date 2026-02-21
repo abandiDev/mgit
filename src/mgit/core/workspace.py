@@ -199,6 +199,20 @@ class Workspace:
         if active_path.exists():
             active_path.unlink()
 
+    def remove(self) -> None:
+        """Remove the mgit workspace metadata (.mgit/ and AGENT.md).
+
+        Only removes mgit's own files — repos and other user files are untouched.
+        """
+        import shutil
+
+        if self.mgit_dir.exists():
+            shutil.rmtree(self.mgit_dir)
+
+        agent_md = self.root / "AGENT.md"
+        if agent_md.exists():
+            agent_md.unlink()
+
     def detect_repo_from_cwd(self, cwd: Path | None = None) -> str | None:
         """Determine which registered repo contains cwd (deepest match).
 
