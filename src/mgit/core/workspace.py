@@ -16,6 +16,7 @@ from mgit.utils.errors import (
 MGIT_DIR = ".mgit"
 CONFIG_FILE = "config.toml"
 FEATURES_DIR = "features"
+WORKTREES_DIR = "worktrees"
 ACTIVE_FILE = "active"
 
 AGENT_MD_TEMPLATE = """\
@@ -29,18 +30,19 @@ Run `mgit context` for full workspace state as JSON.
 
 ### Feature Workflow
 ```
-mgit feature start <name> -r <repo1> -r <repo2>   # Create/join feature + sandbox branches
+mgit feature start <name> -r <repo1> -r <repo2>   # Create feature with isolated worktrees
 mgit status -f <name>                               # Status across feature repos
 mgit commit -m "message" -f <name>                  # Commit across feature repos
 mgit push -f <name>                                 # Push feature branches to remote
-mgit feature switch <name>                          # Switch features (auto-stashes)
+mgit feature switch <name>                          # Set active feature
 ```
 
 ### Conventions
+- Each feature gets isolated worktree directories at `.mgit/worktrees/<feature>/<repo>/`
 - Sandbox branches: `mgit/<feature-name>` (local only, created automatically)
 - Remote branches: created at push time, named after the feature
 - Scope bulk commands with `-f <feature>` or `-f .` (active feature)
-- Changes are auto-stashed when switching features
+- Multiple agents can work on different features concurrently (each in its own worktree)
 """
 
 
@@ -52,6 +54,7 @@ class Workspace:
         self.mgit_dir = root / MGIT_DIR
         self.config_path = self.mgit_dir / CONFIG_FILE
         self.features_dir = self.mgit_dir / FEATURES_DIR
+        self.worktrees_dir = self.mgit_dir / WORKTREES_DIR
         self.name: str = root.name
         self.repos: dict[str, RepoInfo] = {}
 
@@ -101,6 +104,7 @@ class Workspace:
         ws.name = name or path.name
         ws.mgit_dir.mkdir()
         ws.features_dir.mkdir()
+        ws.worktrees_dir.mkdir()
         ws.save()
 
         # Generate AGENT.md in workspace root
@@ -177,6 +181,10 @@ class Workspace:
         p = self.root / repo.path
         # Resolve symlinks for git operations
         return p.resolve() if p.is_symlink() else p
+
+    def worktree_path(self, feature_name: str, repo_name: str) -> Path:
+        """Get the worktree path for a repo within a feature."""
+        return self.worktrees_dir / feature_name / repo_name
 
     # --- Active feature tracking ---
 

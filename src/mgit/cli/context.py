@@ -26,11 +26,15 @@ def context(pretty):
     if active_name:
         try:
             af = fm.get(active_name)
+            wt_paths = fm.get_worktree_paths(active_name)
             active_feature_data = {
                 "name": af.name,
                 "description": af.description,
                 "sandbox_branch": sandbox_branch(af.name),
                 "repos": dict(af.branches),
+                "worktree_paths": {
+                    name: str(path) for name, path in wt_paths.items()
+                },
             }
         except Exception:
             pass
@@ -57,9 +61,13 @@ def context(pretty):
     # Build features list
     features_list = []
     for f in fm.list():
+        wt_paths = fm.get_worktree_paths(f.name)
         features_list.append({
             "name": f.name,
             "repos": list(f.branches.keys()),
+            "worktree_paths": {
+                name: str(path) for name, path in wt_paths.items()
+            },
         })
 
     output = {

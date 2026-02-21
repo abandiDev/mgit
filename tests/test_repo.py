@@ -8,6 +8,7 @@ import pytest
 
 from mgit.core.repo import Repo, add_repo_from_path, add_repo_from_url
 from mgit.core.workspace import Workspace
+from mgit.core import git
 from mgit.models.types import RepoInfo
 
 
@@ -82,6 +83,71 @@ class TestRepo:
         code, stdout, stderr = repo.exec(["echo", "hello"])
         assert code == 0
         assert "hello" in stdout
+
+
+class TestWorktreeOperations:
+    def test_add_worktree(self, initialized_workspace):
+        ws = initialized_workspace
+        repo = Repo(ws.get_repo("repo-a"), ws.root)
+
+        wt_path = ws.worktrees_dir / "test-feat" / "repo-a"
+        wt_path.parent.mkdir(parents=True, exist_ok=True)
+
+        repo.add_worktree(wt_path, "mgit/test-feat")
+
+        assert wt_path.exists()
+        assert wt_path.is_dir()
+        branch = git.get_current_branch(wt_path)
+        assert branch == "mgit/test-feat"
+
+    def test_add_worktree_existing_branch(self, initialized_workspace):
+        """add_worktree works when the branch already exists."""
+        ws = initialized_workspace
+        repo = Repo(ws.get_repo("repo-a"), ws.root)
+
+        # Create branch first
+        repo.checkout("mgit/existing", create=True)
+        repo.checkout("main")
+
+        wt_path = ws.worktrees_dir / "existing" / "repo-a"
+        wt_path.parent.mkdir(parents=True, exist_ok=True)
+
+        repo.add_worktree(wt_path, "mgit/existing")
+
+        assert wt_path.exists()
+        branch = git.get_current_branch(wt_path)
+        assert branch == "mgit/existing"
+
+    def test_remove_worktree(self, initialized_workspace):
+        ws = initialized_workspace
+        repo = Repo(ws.get_repo("repo-a"), ws.root)
+
+        wt_path = ws.worktrees_dir / "test-feat" / "repo-a"
+        wt_path.parent.mkdir(parents=True, exist_ok=True)
+        repo.add_worktree(wt_path, "mgit/test-feat")
+        assert wt_path.exists()
+
+        repo.remove_worktree(wt_path)
+        assert not wt_path.exists()
+
+    def test_at_worktree(self, initialized_workspace):
+        ws = initialized_workspace
+        repo = Repo(ws.get_repo("repo-a"), ws.root)
+
+        wt_path = ws.worktrees_dir / "test-feat" / "repo-a"
+        wt_path.parent.mkdir(parents=True, exist_ok=True)
+        repo.add_worktree(wt_path, "mgit/test-feat")
+
+        # Create a Repo pointing at the worktree
+        wt_repo = Repo.at_worktree(wt_path, ws.get_repo("repo-a"))
+        assert wt_repo.path == wt_path
+        assert wt_repo.current_branch() == "mgit/test-feat"
+
+        # Should be able to do normal operations
+        (wt_path / "wt-file.txt").write_text("worktree content")
+        assert wt_repo.is_dirty()
+        status = wt_repo.status()
+        assert "wt-file.txt" in status
 
 
 class TestAddRepoFromPath:

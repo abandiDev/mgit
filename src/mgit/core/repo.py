@@ -19,6 +19,20 @@ class Repo:
         # Resolve symlinks so git operations work on the real path
         self.path = self._path.resolve() if self._path.is_symlink() else self._path
 
+    @classmethod
+    def at_worktree(cls, worktree_path: Path, info: RepoInfo) -> Repo:
+        """Construct a Repo whose path points to a worktree directory.
+
+        Used by bulk ops to run git commands in a feature's worktree
+        rather than the original repo directory.
+        """
+        repo = object.__new__(cls)
+        repo.info = info
+        repo.workspace_root = worktree_path  # not used for worktree ops
+        repo._path = worktree_path
+        repo.path = worktree_path
+        return repo
+
     def current_branch(self) -> str:
         return git.get_current_branch(self.path)
 
@@ -88,37 +102,28 @@ class Repo:
         )
         return result.returncode, result.stdout, result.stderr
 
-    # --- Stash operations ---
+    # --- Worktree operations ---
 
-    def stash_push(self, message: str) -> bool:
-        """Stash dirty changes (including untracked files) with a message.
+    def add_worktree(self, path: Path, branch: str) -> None:
+        """Create a worktree at path on the given branch.
 
-        Returns True if something was stashed, False if working tree was clean.
+        If the branch doesn't exist, creates it with -b.
         """
-        if not self.is_dirty():
-            return False
-        git.run_git("stash", "push", "-u", "-m", message, cwd=self.path)
-        return True
+        # Check if branch already exists
+        result = git.run_git(
+            "rev-parse", "--verify", branch,
+            cwd=self.path, check=False,
+        )
+        if result.returncode == 0:
+            # Branch exists — just add worktree on it
+            git.run_git("worktree", "add", str(path), branch, cwd=self.path)
+        else:
+            # Branch doesn't exist — create it
+            git.run_git("worktree", "add", "-b", branch, str(path), cwd=self.path)
 
-    def stash_pop_by_message(self, message: str) -> bool:
-        """Find and pop a stash entry by its message.
-
-        Scans `git stash list` for an entry matching the message and pops it.
-        Returns True if a matching stash was found and popped.
-        """
-        result = git.run_git("stash", "list", cwd=self.path, check=False)
-        if result.returncode != 0 or not result.stdout.strip():
-            return False
-
-        for line in result.stdout.strip().splitlines():
-            # Format: stash@{N}: On branch: message
-            if message in line:
-                # Extract stash ref (e.g., "stash@{0}")
-                stash_ref = line.split(":")[0].strip()
-                git.run_git("stash", "pop", stash_ref, cwd=self.path)
-                return True
-
-        return False
+    def remove_worktree(self, path: Path) -> None:
+        """Remove a worktree directory."""
+        git.run_git("worktree", "remove", str(path), "--force", cwd=self.path)
 
     # --- Refspec push ---
 

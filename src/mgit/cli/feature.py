@@ -4,45 +4,10 @@ import click
 
 from mgit.core.feature import (
     FeatureManager,
-    find_dirty_non_sandbox_repos,
     sandbox_branch,
 )
 from mgit.core.workspace import Workspace
 from mgit.utils.errors import MgitError
-
-
-def _prompt_dirty_action(dirty_repos: list[tuple[str, str]]) -> str:
-    """Show dirty non-sandbox repos and ask the user what to do.
-
-    Returns "stash" or "carry".
-    """
-    click.echo("Repos with uncommitted changes:")
-    for name, branch in dirty_repos:
-        click.echo(f"  {name} (on {branch})")
-    click.echo()
-    choice = click.prompt(
-        "Stash these changes or carry them to the feature branch?",
-        type=click.Choice(["stash", "carry"], case_sensitive=False),
-        default="stash",
-    )
-    return choice.lower()
-
-
-def _resolve_dirty_action(
-    stash_flag: bool, carry_flag: bool,
-    dirty_repos: list[tuple[str, str]],
-) -> str:
-    """Determine dirty_action from flags or by prompting.
-
-    Returns "stash" or "carry".
-    """
-    if stash_flag:
-        return "stash"
-    if carry_flag:
-        return "carry"
-    if dirty_repos:
-        return _prompt_dirty_action(dirty_repos)
-    return "carry"
 
 
 @click.group()
@@ -75,18 +40,12 @@ def create(name, description):
 )
 @click.option("--branch", default=None, help="Remote target branch (default: feature name).")
 @click.option("--description", "-d", default="", help="Feature description (only on creation).")
-@click.option("--stash", "stash_flag", is_flag=True, help="Stash uncommitted changes before switching.")
-@click.option("--carry", "carry_flag", is_flag=True, help="Carry uncommitted changes to the feature branch.")
-def start(feature_name, repo_names, branch, description, stash_flag, carry_flag):
-    """Start working on a feature: create/enroll repos and switch to sandbox branches.
+def start(feature_name, repo_names, branch, description):
+    """Start working on a feature: create/enroll repos and set up isolated worktrees.
 
     If no -r is given, auto-detects repo from current directory.
-    If repos have uncommitted changes on non-feature branches, prompts to stash or carry
-    (use --stash or --carry to skip the prompt).
+    Each enrolled repo gets a worktree at .mgit/worktrees/<feature>/<repo>/.
     """
-    if stash_flag and carry_flag:
-        raise click.ClickException("Cannot use both --stash and --carry.")
-
     ws = Workspace.find()
     fm = FeatureManager(ws)
 
@@ -103,63 +62,39 @@ def start(feature_name, repo_names, branch, description, stash_flag, carry_flag)
                 "Use -r to specify repos."
             )
 
-    # Check for dirty repos on non-sandbox branches
-    dirty_repos = find_dirty_non_sandbox_repos(ws, repo_list)
-    dirty_action = _resolve_dirty_action(stash_flag, carry_flag, dirty_repos)
-
     try:
         feat, newly_added = fm.start(
             feature_name, repo_list,
             target_branch=branch,
             description=description,
-            dirty_action=dirty_action,
         )
     except MgitError as e:
         raise click.ClickException(str(e))
 
-    sb = sandbox_branch(feature_name)
     for repo_name in repo_list:
+        wt_path = ws.worktree_path(feature_name, repo_name)
         if repo_name in newly_added:
-            click.echo(f"  {repo_name}: enrolled, on {sb}")
+            click.echo(f"  {repo_name}: enrolled -> {wt_path}")
         else:
-            click.echo(f"  {repo_name}: on {sb}")
+            click.echo(f"  {repo_name}: -> {wt_path}")
 
     click.echo(f"Active feature: {feature_name}")
 
 
 @feature.command("switch")
 @click.argument("name")
-@click.option("--stash", "stash_flag", is_flag=True, help="Stash uncommitted changes before switching.")
-@click.option("--carry", "carry_flag", is_flag=True, help="Carry uncommitted changes to the feature branch.")
-def switch(name, stash_flag, carry_flag):
-    """Switch all enrolled repos to feature's sandbox branches (auto-stash/unstash).
-
-    If repos have uncommitted changes on non-feature branches, prompts to stash or carry
-    (use --stash or --carry to skip the prompt).
-    """
-    if stash_flag and carry_flag:
-        raise click.ClickException("Cannot use both --stash and --carry.")
-
+def switch(name):
+    """Set the active feature. Worktrees are always ready — no branch switching needed."""
     ws = Workspace.find()
     fm = FeatureManager(ws)
 
-    # Load feature to get enrolled repos
     try:
-        feat = fm.get(name)
+        wt_paths = fm.switch(name)
     except MgitError as e:
         raise click.ClickException(str(e))
 
-    # Check for dirty repos on non-sandbox branches
-    dirty_repos = find_dirty_non_sandbox_repos(ws, list(feat.branches.keys()))
-    dirty_action = _resolve_dirty_action(stash_flag, carry_flag, dirty_repos)
-
-    try:
-        switched = fm.switch(name, dirty_action=dirty_action)
-    except MgitError as e:
-        raise click.ClickException(str(e))
-
-    for repo_name, branch_name in switched.items():
-        click.echo(f"  {repo_name}: switched to {branch_name}")
+    for repo_name, wt_path in wt_paths.items():
+        click.echo(f"  {repo_name}: {wt_path}")
     click.echo(f"Active feature: {name}")
 
 
@@ -209,7 +144,8 @@ def show(name):
     click.echo("Repos:")
     if f.branches:
         for repo, target in f.branches.items():
-            click.echo(f"  {repo:<20} -> {target}")
+            wt_path = ws.worktree_path(name, repo)
+            click.echo(f"  {repo:<20} -> {target}  ({wt_path})")
     else:
         click.echo("  (none)")
 
@@ -236,7 +172,7 @@ def list_features():
 @feature.command("delete")
 @click.argument("name")
 def delete(name):
-    """Delete a feature definition."""
+    """Delete a feature definition and clean up its worktrees."""
     ws = Workspace.find()
     fm = FeatureManager(ws)
     try:
@@ -250,7 +186,7 @@ def delete(name):
 @click.argument("feature_name")
 @click.argument("repo_name")
 def remove_repo(feature_name, repo_name):
-    """Remove a repo from a feature."""
+    """Remove a repo from a feature and clean up its worktree."""
     ws = Workspace.find()
     fm = FeatureManager(ws)
     try:

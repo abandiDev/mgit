@@ -1,7 +1,8 @@
-"""FeatureManager: CRUD operations and sandbox workflow for cross-repo features."""
+"""FeatureManager: CRUD operations and worktree-based workflow for cross-repo features."""
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from mgit.core import config
@@ -18,26 +19,6 @@ from mgit.utils.errors import (
 def sandbox_branch(feature_name: str) -> str:
     """Return the sandbox branch name for a feature."""
     return f"mgit/{feature_name}"
-
-
-def find_dirty_non_sandbox_repos(
-    ws: Workspace, repo_names: list[str],
-) -> list[tuple[str, str]]:
-    """Find repos that are dirty and NOT on a sandbox branch.
-
-    Returns list of (repo_name, current_branch) tuples.
-    These are the repos whose changes need an explicit stash-or-carry decision.
-    """
-    dirty = []
-    for name in repo_names:
-        if name not in ws.repos:
-            continue
-        repo = Repo(ws.get_repo(name), ws.root)
-        if repo.is_dirty():
-            branch = repo.current_branch()
-            if not branch.startswith("mgit/"):
-                dirty.append((name, branch))
-    return dirty
 
 
 class FeatureManager:
@@ -82,11 +63,31 @@ class FeatureManager:
         return feature
 
     def delete(self, name: str) -> None:
-        """Delete a feature definition."""
+        """Delete a feature definition and clean up its worktrees."""
         path = self._feature_path(name)
         if not path.exists():
             raise FeatureNotFoundError(f"Feature '{name}' not found")
+
+        # Remove worktrees for all enrolled repos
+        feature = self.get(name)
+        for repo_name in feature.branches:
+            wt_path = self.ws.worktree_path(name, repo_name)
+            if wt_path.exists():
+                try:
+                    repo = Repo(self.ws.get_repo(repo_name), self.ws.root)
+                    repo.remove_worktree(wt_path)
+                except Exception:
+                    # If git worktree remove fails, clean up manually
+                    shutil.rmtree(wt_path, ignore_errors=True)
+
+        # Clean up feature's worktree directory
+        feature_wt_dir = self.ws.worktrees_dir / name
+        if feature_wt_dir.exists():
+            shutil.rmtree(feature_wt_dir, ignore_errors=True)
+
+        # Delete feature file
         path.unlink()
+
         # Clear active if this was the active feature
         if self.ws.get_active_feature() == name:
             self.ws.clear_active_feature()
@@ -110,12 +111,22 @@ class FeatureManager:
         return features
 
     def remove_repo(self, feature_name: str, repo_name: str) -> FeatureInfo:
-        """Remove a repo from a feature."""
+        """Remove a repo from a feature and clean up its worktree."""
         feature = self.get(feature_name)
         if repo_name not in feature.branches:
             raise RepoNotFoundError(
                 f"Repo '{repo_name}' not in feature '{feature_name}'"
             )
+
+        # Remove worktree
+        wt_path = self.ws.worktree_path(feature_name, repo_name)
+        if wt_path.exists():
+            try:
+                repo = Repo(self.ws.get_repo(repo_name), self.ws.root)
+                repo.remove_worktree(wt_path)
+            except Exception:
+                shutil.rmtree(wt_path, ignore_errors=True)
+
         del feature.branches[repo_name]
         self._save_feature(feature)
         return feature
@@ -126,30 +137,17 @@ class FeatureManager:
         repo_names: list[str],
         target_branch: str | None = None,
         description: str = "",
-        dirty_action: str = "carry",
     ) -> tuple[FeatureInfo, list[str]]:
-        """Start working on a feature: create if needed, enroll repos, switch branches.
+        """Start working on a feature: create if needed, enroll repos, create worktrees.
 
-        This is the core operation that handles everything:
-        1. If feature doesn't exist -> create it
-        2. If feature exists -> load it
-        3. For each repo:
-           a. Validate repo exists
-           b. Handle dirty state:
-              - On a different feature's sandbox -> auto-stash (tagged to that feature)
-              - On a non-sandbox branch -> apply dirty_action
-           c. Enroll in feature if not already
-           d. Checkout sandbox branch
-           e. Auto-unstash previous work on this feature
+        For each repo, creates an isolated worktree at
+        .mgit/worktrees/<feature>/<repo>/ on the sandbox branch.
 
         Args:
             feature_name: Name of the feature.
-            repo_names: List of repo names to enroll and switch.
+            repo_names: List of repo names to enroll.
             target_branch: Remote target branch (default = feature name).
             description: Description (only used on initial creation).
-            dirty_action: What to do with dirty repos not on a sandbox branch.
-                "stash" = stash changes before switching.
-                "carry" = bring changes to the new branch.
 
         Returns:
             Tuple of (feature, list_of_newly_added_repo_names).
@@ -157,7 +155,7 @@ class FeatureManager:
         target = target_branch or feature_name
         sb = sandbox_branch(feature_name)
 
-        # 1. Get or create feature
+        # Get or create feature
         try:
             feature = self.get(feature_name)
         except FeatureNotFoundError:
@@ -166,35 +164,24 @@ class FeatureManager:
         newly_added: list[str] = []
 
         for repo_name in repo_names:
-            # 3a. Validate repo exists
+            # Validate repo exists
             if repo_name not in self.ws.repos:
                 raise RepoNotFoundError(
                     f"Repo '{repo_name}' not found in workspace"
                 )
 
-            repo = Repo(self.ws.get_repo(repo_name), self.ws.root)
-            current = repo.current_branch()
+            wt_path = self.ws.worktree_path(feature_name, repo_name)
 
-            # 3b. Handle dirty state
-            if repo.is_dirty():
-                if current.startswith("mgit/") and current != sb:
-                    # On a different feature's sandbox -> auto-stash tagged to that feature
-                    old_feature = current.removeprefix("mgit/")
-                    repo.stash_push(f"mgit:{old_feature}")
-                elif not current.startswith("mgit/") and dirty_action == "stash":
-                    # On a non-sandbox branch, user chose stash
-                    repo.stash_push(f"mgit:branch:{current}")
-
-            # 3c. Enroll in feature if not already
+            # Enroll in feature if not already
             if repo_name not in feature.branches:
                 feature.branches[repo_name] = target
                 newly_added.append(repo_name)
 
-            # 3d. Checkout sandbox branch
-            repo.checkout(sb)
-
-            # 3e. Auto-unstash previous work on this feature
-            repo.stash_pop_by_message(f"mgit:{feature_name}")
+            # Create worktree if it doesn't already exist
+            if not wt_path.exists():
+                repo = Repo(self.ws.get_repo(repo_name), self.ws.root)
+                wt_path.parent.mkdir(parents=True, exist_ok=True)
+                repo.add_worktree(wt_path, sb)
 
         # Save feature state
         self._save_feature(feature)
@@ -204,49 +191,30 @@ class FeatureManager:
 
         return feature, newly_added
 
-    def switch(self, name: str, dirty_action: str = "carry") -> dict[str, str]:
-        """Switch all repos in a feature to their sandbox branches.
-
-        Auto-stashes dirty work on the old feature's sandbox, asks about
-        dirty work on non-sandbox branches via dirty_action.
+    def switch(self, name: str) -> dict[str, Path]:
+        """Set the active feature. Worktrees are always ready.
 
         Args:
             name: Feature name to switch to.
-            dirty_action: What to do with dirty repos not on a sandbox branch.
-                "stash" = stash changes before switching.
-                "carry" = bring changes to the new branch.
 
         Returns:
-            Dict of repo_name -> sandbox_branch that were checked out.
+            Dict of repo_name -> worktree_path for each enrolled repo.
         """
         feature = self.get(name)
-        sb = sandbox_branch(name)
-        old_active = self.ws.get_active_feature()
-
-        switched = {}
-        for repo_name in feature.branches:
-            repo = Repo(self.ws.get_repo(repo_name), self.ws.root)
-            current = repo.current_branch()
-
-            # Handle dirty state
-            if repo.is_dirty():
-                if old_active and current.startswith("mgit/"):
-                    # On a feature's sandbox -> auto-stash tagged to that feature
-                    old_feature = current.removeprefix("mgit/")
-                    repo.stash_push(f"mgit:{old_feature}")
-                elif not current.startswith("mgit/") and dirty_action == "stash":
-                    # On a non-sandbox branch, user chose stash
-                    repo.stash_push(f"mgit:branch:{current}")
-
-            # Checkout sandbox branch
-            repo.checkout(sb)
-
-            # Auto-unstash work for this feature
-            repo.stash_pop_by_message(f"mgit:{name}")
-
-            switched[repo_name] = sb
 
         # Set as active feature
         self.ws.set_active_feature(name)
 
-        return switched
+        return self.get_worktree_paths(name)
+
+    def get_worktree_paths(self, feature_name: str) -> dict[str, Path]:
+        """Get worktree paths for each enrolled repo in a feature.
+
+        Returns:
+            Dict of repo_name -> worktree_path.
+        """
+        feature = self.get(feature_name)
+        paths = {}
+        for repo_name in feature.branches:
+            paths[repo_name] = self.ws.worktree_path(feature_name, repo_name)
+        return paths

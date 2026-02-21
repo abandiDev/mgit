@@ -9,7 +9,7 @@ import click
 from mgit.core.feature import FeatureManager
 from mgit.core.repo import Repo
 from mgit.core.workspace import Workspace
-from mgit.models.types import OpStatus, RepoOpResult
+from mgit.models.types import FeatureInfo, OpStatus, RepoOpResult
 from mgit.utils.display import print_bulk_results
 from mgit.utils.errors import MgitError
 from mgit.utils.parallel import run_bulk
@@ -53,6 +53,19 @@ def _resolve_repos(ws: Workspace, feature_name: str | None, repos_csv: str | Non
         return list(ws.repos.keys())
 
 
+def _make_repo(ws: Workspace, repo_name: str, feature_info: FeatureInfo | None = None) -> Repo:
+    """Create a Repo at the right path (worktree or original).
+
+    When a feature is specified and the repo is enrolled, returns a Repo
+    pointing to the worktree directory. Otherwise returns a Repo pointing
+    to the original repo path.
+    """
+    if feature_info and repo_name in feature_info.branches:
+        wt_path = ws.worktree_path(feature_info.name, repo_name)
+        return Repo.at_worktree(wt_path, ws.get_repo(repo_name))
+    return Repo(ws.get_repo(repo_name), ws.root)
+
+
 def _common_options(f):
     """Shared options for bulk commands."""
     f = click.option("--feature", "-f", default=None, help="Scope to a feature's repos (use '.' for active).")(f)
@@ -61,15 +74,25 @@ def _common_options(f):
     return f
 
 
+def _get_feature_info(ws: Workspace, feature: str | None) -> FeatureInfo | None:
+    """Load feature info if a feature is specified."""
+    if not feature:
+        return None
+    resolved = _resolve_feature_name(ws, feature)
+    fm = FeatureManager(ws)
+    return fm.get(resolved)
+
+
 @click.command("status")
 @_common_options
 def status(feature, repos, fail_fast):
     """Show git status across repos."""
     ws = Workspace.find()
     repo_names = _resolve_repos(ws, feature, repos)
+    feature_info = _get_feature_info(ws, feature)
 
     def op(name: str) -> RepoOpResult:
-        repo = Repo(ws.get_repo(name), ws.root)
+        repo = _make_repo(ws, name, feature_info)
         branch = repo.current_branch()
         output = repo.status()
         if output.strip():
@@ -94,9 +117,10 @@ def pull(feature, repos, fail_fast):
     """Pull across repos."""
     ws = Workspace.find()
     repo_names = _resolve_repos(ws, feature, repos)
+    feature_info = _get_feature_info(ws, feature)
 
     def op(name: str) -> RepoOpResult:
-        repo = Repo(ws.get_repo(name), ws.root)
+        repo = _make_repo(ws, name, feature_info)
         try:
             output = repo.pull()
             return RepoOpResult(
@@ -120,16 +144,10 @@ def push(feature, repos, fail_fast):
     """Push across repos. When -f is used, pushes sandbox branches to target remote branches."""
     ws = Workspace.find()
     repo_names = _resolve_repos(ws, feature, repos)
-
-    # If scoped to a feature, use push_to_target with refspec
-    feature_info = None
-    if feature:
-        resolved = _resolve_feature_name(ws, feature)
-        fm = FeatureManager(ws)
-        feature_info = fm.get(resolved)
+    feature_info = _get_feature_info(ws, feature)
 
     def op(name: str) -> RepoOpResult:
-        repo = Repo(ws.get_repo(name), ws.root)
+        repo = _make_repo(ws, name, feature_info)
         try:
             if feature_info and name in feature_info.branches:
                 target = feature_info.branches[name]
@@ -158,9 +176,10 @@ def commit(message, feature, repos, fail_fast):
     """Commit across repos (stages all changes)."""
     ws = Workspace.find()
     repo_names = _resolve_repos(ws, feature, repos)
+    feature_info = _get_feature_info(ws, feature)
 
     def op(name: str) -> RepoOpResult:
-        repo = Repo(ws.get_repo(name), ws.root)
+        repo = _make_repo(ws, name, feature_info)
         try:
             output = repo.commit(message)
             if "nothing to commit" in output:
@@ -190,10 +209,11 @@ def exec_cmd(command, feature, repos, fail_fast):
     """Run an arbitrary command in each repo."""
     ws = Workspace.find()
     repo_names = _resolve_repos(ws, feature, repos)
+    feature_info = _get_feature_info(ws, feature)
     cmd_list = list(command)
 
     def op(name: str) -> RepoOpResult:
-        repo = Repo(ws.get_repo(name), ws.root)
+        repo = _make_repo(ws, name, feature_info)
         returncode, stdout, stderr = repo.exec(cmd_list)
         if returncode == 0:
             return RepoOpResult(

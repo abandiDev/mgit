@@ -1,13 +1,13 @@
-"""Tests for feature lifecycle."""
+"""Tests for feature lifecycle (worktree-based model)."""
 
 import pytest
 
 from mgit.core.feature import (
     FeatureManager,
-    find_dirty_non_sandbox_repos,
     sandbox_branch,
 )
 from mgit.core.repo import Repo
+from mgit.core import git
 from mgit.utils.errors import (
     FeatureExistsError,
     FeatureNotFoundError,
@@ -21,34 +21,6 @@ class TestSandboxBranch:
 
     def test_sandbox_branch_simple(self):
         assert sandbox_branch("fix") == "mgit/fix"
-
-
-class TestFindDirtyNonSandboxRepos:
-    def test_clean_repos(self, initialized_workspace):
-        ws = initialized_workspace
-        result = find_dirty_non_sandbox_repos(ws, ["repo-a", "repo-b"])
-        assert result == []
-
-    def test_dirty_on_main(self, initialized_workspace):
-        ws = initialized_workspace
-        (ws.root / "repo-a" / "dirty.txt").write_text("uncommitted")
-        result = find_dirty_non_sandbox_repos(ws, ["repo-a", "repo-b"])
-        assert len(result) == 1
-        assert result[0][0] == "repo-a"
-
-    def test_dirty_on_sandbox_not_reported(self, initialized_workspace):
-        ws = initialized_workspace
-        fm = FeatureManager(ws)
-        fm.start("feat", ["repo-a"])
-        (ws.root / "repo-a" / "dirty.txt").write_text("uncommitted")
-        # repo-a is on mgit/feat — should not be reported
-        result = find_dirty_non_sandbox_repos(ws, ["repo-a"])
-        assert result == []
-
-    def test_unknown_repo_skipped(self, initialized_workspace):
-        ws = initialized_workspace
-        result = find_dirty_non_sandbox_repos(ws, ["no-such-repo"])
-        assert result == []
 
 
 class TestFeatureCreate:
@@ -96,6 +68,24 @@ class TestFeatureDelete:
         fm.delete("active-feat")
         assert ws.get_active_feature() is None
 
+    def test_delete_cleans_up_worktrees(self, initialized_workspace):
+        ws = initialized_workspace
+        fm = FeatureManager(ws)
+
+        fm.start("to-delete", ["repo-a", "repo-b"])
+        wt_a = ws.worktree_path("to-delete", "repo-a")
+        wt_b = ws.worktree_path("to-delete", "repo-b")
+        assert wt_a.exists()
+        assert wt_b.exists()
+
+        fm.delete("to-delete")
+
+        # Worktree directories should be gone
+        assert not wt_a.exists()
+        assert not wt_b.exists()
+        # Feature-level worktree dir should be gone
+        assert not (ws.worktrees_dir / "to-delete").exists()
+
 
 class TestFeatureGet:
     def test_get_feature(self, initialized_workspace):
@@ -134,8 +124,6 @@ class TestFeatureRemoveRepo:
     def test_remove_repo_from_feature(self, initialized_workspace):
         ws = initialized_workspace
         fm = FeatureManager(ws)
-        fm.create("feat")
-        # Enroll repos via start
         fm.start("feat", ["repo-a", "repo-b"])
         fm.remove_repo("feat", "repo-a")
         feat = fm.get("feat")
@@ -145,10 +133,24 @@ class TestFeatureRemoveRepo:
     def test_remove_nonexistent_repo_raises(self, initialized_workspace):
         ws = initialized_workspace
         fm = FeatureManager(ws)
-        fm.create("feat")
         fm.start("feat", ["repo-a"])
         with pytest.raises(RepoNotFoundError):
             fm.remove_repo("feat", "repo-b")
+
+    def test_remove_repo_cleans_worktree(self, initialized_workspace):
+        ws = initialized_workspace
+        fm = FeatureManager(ws)
+
+        fm.start("feat", ["repo-a", "repo-b"])
+        wt_a = ws.worktree_path("feat", "repo-a")
+        assert wt_a.exists()
+
+        fm.remove_repo("feat", "repo-a")
+
+        # Worktree for repo-a should be gone
+        assert not wt_a.exists()
+        # repo-b's worktree should still exist
+        assert ws.worktree_path("feat", "repo-b").exists()
 
 
 class TestFeatureStart:
@@ -163,11 +165,28 @@ class TestFeatureStart:
         assert "repo-b" in feat.branches
         assert set(newly_added) == {"repo-a", "repo-b"}
 
-        # Verify repos are on sandbox branch
-        repo_a = Repo(ws.get_repo("repo-a"), ws.root)
-        assert repo_a.current_branch() == "mgit/my-feat"
-        repo_b = Repo(ws.get_repo("repo-b"), ws.root)
-        assert repo_b.current_branch() == "mgit/my-feat"
+    def test_start_creates_worktree_dirs(self, initialized_workspace):
+        ws = initialized_workspace
+        fm = FeatureManager(ws)
+
+        fm.start("my-feat", ["repo-a", "repo-b"])
+
+        wt_a = ws.worktree_path("my-feat", "repo-a")
+        wt_b = ws.worktree_path("my-feat", "repo-b")
+        assert wt_a.exists()
+        assert wt_b.exists()
+        assert wt_a.is_dir()
+        assert wt_b.is_dir()
+
+    def test_start_worktree_has_sandbox_branch(self, initialized_workspace):
+        ws = initialized_workspace
+        fm = FeatureManager(ws)
+
+        fm.start("my-feat", ["repo-a"])
+
+        wt_path = ws.worktree_path("my-feat", "repo-a")
+        branch = git.get_current_branch(wt_path)
+        assert branch == "mgit/my-feat"
 
     def test_start_existing_feature_enrolls_more(self, initialized_workspace):
         ws = initialized_workspace
@@ -201,42 +220,6 @@ class TestFeatureStart:
         with pytest.raises(RepoNotFoundError):
             fm.start("my-feat", ["no-such-repo"])
 
-    def test_start_auto_stashes_on_different_feature(self, initialized_workspace):
-        ws = initialized_workspace
-        fm = FeatureManager(ws)
-
-        # Start feature A on repo-a
-        fm.start("feat-a", ["repo-a"])
-
-        # Make repo-a dirty while on feat-a's sandbox
-        (ws.root / "repo-a" / "dirty.txt").write_text("dirty work")
-
-        # Start feature B on repo-a — should auto-stash feat-a changes
-        fm.start("feat-b", ["repo-a"])
-
-        repo_a = Repo(ws.get_repo("repo-a"), ws.root)
-        assert repo_a.current_branch() == "mgit/feat-b"
-        # Should be clean after stash
-        assert not repo_a.is_dirty()
-
-    def test_start_auto_unstashes_previous_work(self, initialized_workspace):
-        ws = initialized_workspace
-        fm = FeatureManager(ws)
-
-        # Start feature A and make changes
-        fm.start("feat-a", ["repo-a"])
-        (ws.root / "repo-a" / "work.txt").write_text("feat-a work")
-
-        # Switch to feature B (auto-stashes feat-a)
-        fm.start("feat-b", ["repo-a"])
-        assert not Repo(ws.get_repo("repo-a"), ws.root).is_dirty()
-
-        # Switch back to feature A (auto-unstashes)
-        fm.start("feat-a", ["repo-a"])
-        repo_a = Repo(ws.get_repo("repo-a"), ws.root)
-        assert repo_a.current_branch() == "mgit/feat-a"
-        assert (ws.root / "repo-a" / "work.txt").exists()
-
     def test_start_idempotent_re_enrollment(self, initialized_workspace):
         ws = initialized_workspace
         fm = FeatureManager(ws)
@@ -247,95 +230,71 @@ class TestFeatureStart:
         assert added1 == ["repo-a"]
         assert added2 == []  # Already enrolled
 
-    def test_start_dirty_non_sandbox_stash(self, initialized_workspace):
-        """dirty_action='stash' stashes changes on a non-sandbox branch."""
+    def test_parallel_features_same_repo(self, initialized_workspace):
+        """Two features on the same repo should each get independent worktrees."""
         ws = initialized_workspace
         fm = FeatureManager(ws)
 
-        # Make repo-a dirty on main
-        (ws.root / "repo-a" / "local.txt").write_text("local work")
-        repo_a = Repo(ws.get_repo("repo-a"), ws.root)
-        assert repo_a.is_dirty()
+        fm.start("feat-a", ["repo-a"])
+        fm.start("feat-b", ["repo-a"])
 
-        fm.start("my-feat", ["repo-a"], dirty_action="stash")
+        wt_a = ws.worktree_path("feat-a", "repo-a")
+        wt_b = ws.worktree_path("feat-b", "repo-a")
 
-        repo_a = Repo(ws.get_repo("repo-a"), ws.root)
-        assert repo_a.current_branch() == "mgit/my-feat"
-        # Changes were stashed, tree should be clean
-        assert not repo_a.is_dirty()
-        # The file should not exist on the sandbox branch
-        assert not (ws.root / "repo-a" / "local.txt").exists()
+        assert wt_a.exists()
+        assert wt_b.exists()
+        assert wt_a != wt_b
 
-    def test_start_dirty_non_sandbox_carry(self, initialized_workspace):
-        """dirty_action='carry' brings changes to the new sandbox branch."""
+        # Each worktree should be on its own sandbox branch
+        branch_a = git.get_current_branch(wt_a)
+        branch_b = git.get_current_branch(wt_b)
+        assert branch_a == "mgit/feat-a"
+        assert branch_b == "mgit/feat-b"
+
+        # Create files in each — no conflicts
+        (wt_a / "a-work.txt").write_text("feat-a work")
+        (wt_b / "b-work.txt").write_text("feat-b work")
+        assert (wt_a / "a-work.txt").exists()
+        assert (wt_b / "b-work.txt").exists()
+        # Files should NOT bleed across worktrees
+        assert not (wt_a / "b-work.txt").exists()
+        assert not (wt_b / "a-work.txt").exists()
+
+    def test_start_does_not_modify_original_repo(self, initialized_workspace):
+        """Starting a feature should not change the original repo's branch."""
         ws = initialized_workspace
         fm = FeatureManager(ws)
 
-        # Make repo-a dirty on main
-        (ws.root / "repo-a" / "local.txt").write_text("local work")
-        repo_a = Repo(ws.get_repo("repo-a"), ws.root)
-        assert repo_a.is_dirty()
+        repo = Repo(ws.get_repo("repo-a"), ws.root)
+        original_branch = repo.current_branch()
 
-        fm.start("my-feat", ["repo-a"], dirty_action="carry")
-
-        repo_a = Repo(ws.get_repo("repo-a"), ws.root)
-        assert repo_a.current_branch() == "mgit/my-feat"
-        # Changes were carried, tree should still be dirty
-        assert repo_a.is_dirty()
-        assert (ws.root / "repo-a" / "local.txt").exists()
-
-    def test_start_dirty_non_sandbox_defaults_to_carry(self, initialized_workspace):
-        """Default dirty_action is 'carry' (backward compatible)."""
-        ws = initialized_workspace
-        fm = FeatureManager(ws)
-
-        (ws.root / "repo-a" / "local.txt").write_text("local work")
-
-        # No dirty_action passed — defaults to carry
         fm.start("my-feat", ["repo-a"])
 
-        repo_a = Repo(ws.get_repo("repo-a"), ws.root)
-        assert repo_a.is_dirty()
-        assert (ws.root / "repo-a" / "local.txt").exists()
+        # Original repo should still be on its original branch
+        assert repo.current_branch() == original_branch
 
 
 class TestFeatureSwitch:
-    def test_switch_branches(self, initialized_workspace):
+    def test_switch_just_sets_active(self, initialized_workspace):
+        """Switch should just set the active feature — no checkout happens."""
         ws = initialized_workspace
         fm = FeatureManager(ws)
 
-        # Start a feature to enroll repos
-        fm.start("feat", ["repo-a", "repo-b"])
-
-        # Go back to main
-        Repo(ws.get_repo("repo-a"), ws.root).checkout("main")
-        Repo(ws.get_repo("repo-b"), ws.root).checkout("main")
-
-        # Switch back
-        switched = fm.switch("feat")
-        assert switched == {
-            "repo-a": "mgit/feat",
-            "repo-b": "mgit/feat",
-        }
-        repo_a = Repo(ws.get_repo("repo-a"), ws.root)
-        assert repo_a.current_branch() == "mgit/feat"
-        repo_b = Repo(ws.get_repo("repo-b"), ws.root)
-        assert repo_b.current_branch() == "mgit/feat"
-
-    def test_switch_auto_stashes_old_feature(self, initialized_workspace):
-        ws = initialized_workspace
-        fm = FeatureManager(ws)
-
-        # Start feat-a, make dirty
         fm.start("feat-a", ["repo-a"])
-        (ws.root / "repo-a" / "change.txt").write_text("feat-a change")
-
-        # Start feat-b with repo-a enrolled
         fm.start("feat-b", ["repo-a"])
 
-        # Switch to feat-b should have stashed feat-a
-        repo_a = Repo(ws.get_repo("repo-a"), ws.root)
-        assert not repo_a.is_dirty()
+        # Original repo branch should not change during switch
+        repo = Repo(ws.get_repo("repo-a"), ws.root)
+        branch_before = repo.current_branch()
+
+        wt_paths = fm.switch("feat-a")
+
+        assert ws.get_active_feature() == "feat-a"
+        # Original repo unchanged
+        assert repo.current_branch() == branch_before
+        # Returns worktree paths
+        assert "repo-a" in wt_paths
+        assert wt_paths["repo-a"] == ws.worktree_path("feat-a", "repo-a")
 
     def test_switch_sets_active_feature(self, initialized_workspace):
         ws = initialized_workspace
@@ -347,42 +306,26 @@ class TestFeatureSwitch:
         fm.switch("feat-a")
         assert ws.get_active_feature() == "feat-a"
 
-    def test_switch_dirty_non_sandbox_stash(self, initialized_workspace):
-        """switch with dirty_action='stash' stashes non-sandbox dirty repos."""
+    def test_switch_returns_worktree_paths(self, initialized_workspace):
         ws = initialized_workspace
         fm = FeatureManager(ws)
 
-        # Enroll repo-a in a feature
-        fm.start("feat", ["repo-a"])
+        fm.start("feat", ["repo-a", "repo-b"])
 
-        # Move repo-a back to main and make it dirty
-        Repo(ws.get_repo("repo-a"), ws.root).checkout("main")
-        (ws.root / "repo-a" / "main-work.txt").write_text("on main")
+        wt_paths = fm.switch("feat")
+        assert set(wt_paths.keys()) == {"repo-a", "repo-b"}
+        assert wt_paths["repo-a"] == ws.worktree_path("feat", "repo-a")
+        assert wt_paths["repo-b"] == ws.worktree_path("feat", "repo-b")
 
-        # Switch with stash
-        switched = fm.switch("feat", dirty_action="stash")
 
-        repo_a = Repo(ws.get_repo("repo-a"), ws.root)
-        assert repo_a.current_branch() == "mgit/feat"
-        assert not repo_a.is_dirty()
-        assert not (ws.root / "repo-a" / "main-work.txt").exists()
-
-    def test_switch_dirty_non_sandbox_carry(self, initialized_workspace):
-        """switch with dirty_action='carry' brings changes along."""
+class TestGetWorktreePaths:
+    def test_get_worktree_paths(self, initialized_workspace):
         ws = initialized_workspace
         fm = FeatureManager(ws)
 
-        # Enroll repo-a in a feature
-        fm.start("feat", ["repo-a"])
+        fm.start("my-feat", ["repo-a", "repo-b"])
+        paths = fm.get_worktree_paths("my-feat")
 
-        # Move repo-a back to main and make it dirty
-        Repo(ws.get_repo("repo-a"), ws.root).checkout("main")
-        (ws.root / "repo-a" / "main-work.txt").write_text("on main")
-
-        # Switch with carry
-        switched = fm.switch("feat", dirty_action="carry")
-
-        repo_a = Repo(ws.get_repo("repo-a"), ws.root)
-        assert repo_a.current_branch() == "mgit/feat"
-        assert repo_a.is_dirty()
-        assert (ws.root / "repo-a" / "main-work.txt").exists()
+        assert set(paths.keys()) == {"repo-a", "repo-b"}
+        assert paths["repo-a"] == ws.worktree_path("my-feat", "repo-a")
+        assert paths["repo-b"] == ws.worktree_path("my-feat", "repo-b")
