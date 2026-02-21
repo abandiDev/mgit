@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mgit"
+version = "0.1.0"
+description = "Multi-repo git workspace manager"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.1",
+    "tomli-w>=1.0",
+]
+
+[project.scripts]
+mgit = "mgit.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.1",
+    "mypy>=1.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
