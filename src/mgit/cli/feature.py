@@ -4,6 +4,7 @@ import click
 
 from mgit.core.feature import (
     FeatureManager,
+    find_dirty_repos,
     sandbox_branch,
 )
 from mgit.core.workspace import Workspace
@@ -40,7 +41,9 @@ def create(name, description):
 )
 @click.option("--branch", default=None, help="Remote target branch (default: feature name).")
 @click.option("--description", "-d", default="", help="Feature description (only on creation).")
-def start(feature_name, repo_names, branch, description):
+@click.option("--carry/--no-carry", default=None,
+              help="Carry uncommitted changes to the feature worktree.")
+def start(feature_name, repo_names, branch, description, carry):
     """Start working on a feature: create/enroll repos and set up isolated worktrees.
 
     If no -r is given, auto-detects repo from current directory.
@@ -62,21 +65,43 @@ def start(feature_name, repo_names, branch, description):
                 "Use -r to specify repos."
             )
 
+    # Detect dirty repos and resolve carry behavior
+    carry_repos: set[str] | None = None
+    if carry is not False:
+        dirty = find_dirty_repos(ws, repo_list)
+        if dirty:
+            if carry is None:
+                # No flag — prompt
+                click.echo("Repos with uncommitted changes:")
+                for name, br in dirty:
+                    click.echo(f"  {name} (on {br})")
+                do_carry = click.confirm(
+                    "Carry changes to the feature worktree?", default=False
+                )
+            else:
+                do_carry = True  # --carry flag
+
+            if do_carry:
+                carry_repos = {name for name, _ in dirty}
+
     try:
         feat, newly_added = fm.start(
             feature_name, repo_list,
             target_branch=branch,
             description=description,
+            carry_repos=carry_repos,
         )
     except MgitError as e:
         raise click.ClickException(str(e))
 
+    carried = carry_repos or set()
     for repo_name in repo_list:
         wt_path = ws.worktree_path(feature_name, repo_name)
+        suffix = " (changes carried)" if repo_name in carried else ""
         if repo_name in newly_added:
-            click.echo(f"  {repo_name}: enrolled -> {wt_path}")
+            click.echo(f"  {repo_name}: enrolled -> {wt_path}{suffix}")
         else:
-            click.echo(f"  {repo_name}: -> {wt_path}")
+            click.echo(f"  {repo_name}: -> {wt_path}{suffix}")
 
     click.echo(f"Active feature: {feature_name}")
 

@@ -4,6 +4,7 @@ import pytest
 
 from mgit.core.feature import (
     FeatureManager,
+    find_dirty_repos,
     sandbox_branch,
 )
 from mgit.core.repo import Repo
@@ -329,3 +330,108 @@ class TestGetWorktreePaths:
         assert set(paths.keys()) == {"repo-a", "repo-b"}
         assert paths["repo-a"] == ws.worktree_path("my-feat", "repo-a")
         assert paths["repo-b"] == ws.worktree_path("my-feat", "repo-b")
+
+
+class TestFindDirtyRepos:
+    def test_find_dirty_repos_none_dirty(self, initialized_workspace):
+        ws = initialized_workspace
+        result = find_dirty_repos(ws, ["repo-a", "repo-b"])
+        assert result == []
+
+    def test_find_dirty_repos_one_dirty(self, initialized_workspace):
+        ws = initialized_workspace
+        # Make repo-a dirty
+        repo_a = Repo(ws.get_repo("repo-a"), ws.root)
+        (repo_a.path / "dirty.txt").write_text("dirty")
+
+        result = find_dirty_repos(ws, ["repo-a", "repo-b"])
+        assert len(result) == 1
+        assert result[0][0] == "repo-a"
+
+    def test_find_dirty_repos_skips_unknown(self, initialized_workspace):
+        ws = initialized_workspace
+        result = find_dirty_repos(ws, ["repo-a", "no-such-repo"])
+        assert result == []
+
+
+class TestFeatureStartCarry:
+    def test_start_carry_moves_changes_to_worktree(self, initialized_workspace):
+        """Dirty file should appear in worktree, original should be clean."""
+        ws = initialized_workspace
+        fm = FeatureManager(ws)
+
+        # Make repo-a dirty
+        repo_a = Repo(ws.get_repo("repo-a"), ws.root)
+        (repo_a.path / "secret.txt").write_text("local-secret")
+
+        assert repo_a.is_dirty()
+
+        fm.start("carry-feat", ["repo-a"], carry_repos={"repo-a"})
+
+        # Worktree should have the dirty file
+        wt_path = ws.worktree_path("carry-feat", "repo-a")
+        assert (wt_path / "secret.txt").exists()
+        assert (wt_path / "secret.txt").read_text() == "local-secret"
+
+        # Original repo should be clean
+        assert not repo_a.is_dirty()
+
+    def test_start_no_carry_worktree_is_clean(self, initialized_workspace):
+        """Dirty file should stay in original, worktree should be clean."""
+        ws = initialized_workspace
+        fm = FeatureManager(ws)
+
+        # Make repo-a dirty
+        repo_a = Repo(ws.get_repo("repo-a"), ws.root)
+        (repo_a.path / "secret.txt").write_text("local-secret")
+
+        fm.start("no-carry-feat", ["repo-a"])
+
+        # Worktree should NOT have the dirty file
+        wt_path = ws.worktree_path("no-carry-feat", "repo-a")
+        assert not (wt_path / "secret.txt").exists()
+
+        # Original repo should still be dirty
+        assert repo_a.is_dirty()
+
+    def test_start_carry_only_dirty_repos(self, initialized_workspace):
+        """Only dirty repos are carried; clean repos are unaffected."""
+        ws = initialized_workspace
+        fm = FeatureManager(ws)
+
+        # Make only repo-a dirty
+        repo_a = Repo(ws.get_repo("repo-a"), ws.root)
+        (repo_a.path / "dirty.txt").write_text("changes")
+
+        fm.start(
+            "mixed-feat", ["repo-a", "repo-b"],
+            carry_repos={"repo-a"},
+        )
+
+        wt_a = ws.worktree_path("mixed-feat", "repo-a")
+        wt_b = ws.worktree_path("mixed-feat", "repo-b")
+
+        # repo-a's worktree should have the file
+        assert (wt_a / "dirty.txt").exists()
+        # repo-b's worktree should be clean (just README)
+        assert not (wt_b / "dirty.txt").exists()
+        # Original repo-a should be clean
+        assert not repo_a.is_dirty()
+
+    def test_start_carry_untracked_files(self, initialized_workspace):
+        """Untracked files should also be carried via --include-untracked."""
+        ws = initialized_workspace
+        fm = FeatureManager(ws)
+
+        # Create an untracked file in repo-a
+        repo_a = Repo(ws.get_repo("repo-a"), ws.root)
+        (repo_a.path / "untracked.txt").write_text("new-file")
+
+        fm.start("untracked-feat", ["repo-a"], carry_repos={"repo-a"})
+
+        wt_path = ws.worktree_path("untracked-feat", "repo-a")
+        assert (wt_path / "untracked.txt").exists()
+        assert (wt_path / "untracked.txt").read_text() == "new-file"
+
+        # Original should be clean
+        assert not repo_a.is_dirty()

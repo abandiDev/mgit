@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from mgit.core import config
+from mgit.core import config, git
 from mgit.core.repo import Repo
 from mgit.core.workspace import Workspace
 from mgit.models.types import FeatureInfo
@@ -19,6 +19,21 @@ from mgit.utils.errors import (
 def sandbox_branch(feature_name: str) -> str:
     """Return the sandbox branch name for a feature."""
     return f"mgit/{feature_name}"
+
+
+def find_dirty_repos(ws: Workspace, repo_names: list[str]) -> list[tuple[str, str]]:
+    """Find repos with uncommitted changes.
+
+    Returns list of (repo_name, current_branch) tuples.
+    """
+    dirty = []
+    for name in repo_names:
+        if name not in ws.repos:
+            continue
+        repo = Repo(ws.get_repo(name), ws.root)
+        if repo.is_dirty():
+            dirty.append((name, repo.current_branch()))
+    return dirty
 
 
 class FeatureManager:
@@ -137,6 +152,7 @@ class FeatureManager:
         repo_names: list[str],
         target_branch: str | None = None,
         description: str = "",
+        carry_repos: set[str] | None = None,
     ) -> tuple[FeatureInfo, list[str]]:
         """Start working on a feature: create if needed, enroll repos, create worktrees.
 
@@ -148,12 +164,15 @@ class FeatureManager:
             repo_names: List of repo names to enroll.
             target_branch: Remote target branch (default = feature name).
             description: Description (only used on initial creation).
+            carry_repos: Set of repo names whose uncommitted changes should be
+                carried to the new worktree via git stash. None means no carry.
 
         Returns:
             Tuple of (feature, list_of_newly_added_repo_names).
         """
         target = target_branch or feature_name
         sb = sandbox_branch(feature_name)
+        carry = carry_repos or set()
 
         # Get or create feature
         try:
@@ -180,8 +199,18 @@ class FeatureManager:
             # Create worktree if it doesn't already exist
             if not wt_path.exists():
                 repo = Repo(self.ws.get_repo(repo_name), self.ws.root)
+
+                # Stash changes before creating worktree if carrying
+                stashed = False
+                if repo_name in carry:
+                    stashed = repo.stash_push(f"mgit-carry:{feature_name}")
+
                 wt_path.parent.mkdir(parents=True, exist_ok=True)
                 repo.add_worktree(wt_path, sb)
+
+                # Pop stash in the worktree if we stashed something
+                if stashed:
+                    git.run_git("stash", "pop", cwd=wt_path)
 
         # Save feature state
         self._save_feature(feature)

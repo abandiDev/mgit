@@ -102,6 +102,24 @@ class Repo:
         )
         return result.returncode, result.stdout, result.stderr
 
+    # --- Stash operations ---
+
+    def stash_push(self, message: str) -> bool:
+        """Stash all changes (including untracked) with a message.
+
+        Returns True if something was stashed, False if clean.
+        """
+        result = git.run_git(
+            "stash", "push", "--include-untracked", "-m", message,
+            cwd=self.path,
+        )
+        # git stash prints "No local changes to save" when clean
+        return "No local changes to save" not in result.stdout
+
+    def stash_pop(self) -> None:
+        """Pop the most recent stash entry."""
+        git.run_git("stash", "pop", cwd=self.path)
+
     # --- Worktree operations ---
 
     def add_worktree(self, path: Path, branch: str) -> None:
