@@ -53,15 +53,18 @@ def _resolve_repos(ws: Workspace, feature_name: str | None, repos_csv: str | Non
         return list(ws.repos.keys())
 
 
-def _make_repo(ws: Workspace, repo_name: str, feature_info: FeatureInfo | None = None) -> Repo:
+def _make_repo(ws: Workspace, repo_name: str, feature_info: FeatureInfo | None = None) -> Repo | None:
     """Create a Repo at the right path (worktree or original).
 
     When a feature is specified and the repo is enrolled, returns a Repo
-    pointing to the worktree directory. Otherwise returns a Repo pointing
-    to the original repo path.
+    pointing to the worktree directory — or None if the worktree hasn't
+    been materialized yet. Otherwise returns a Repo pointing to the
+    original repo path.
     """
     if feature_info and repo_name in feature_info.branches:
         wt_path = ws.worktree_path(feature_info.name, repo_name)
+        if not wt_path.exists():
+            return None
         return Repo.at_worktree(wt_path, ws.get_repo(repo_name))
     return Repo(ws.get_repo(repo_name), ws.root)
 
@@ -93,6 +96,9 @@ def status(feature, repos, fail_fast):
 
     def op(name: str) -> RepoOpResult:
         repo = _make_repo(ws, name, feature_info)
+        if repo is None:
+            return RepoOpResult(repo=name, status=OpStatus.SKIPPED,
+                                message="not materialized")
         branch = repo.current_branch()
         output = repo.status()
         if output.strip():
@@ -121,6 +127,9 @@ def pull(feature, repos, fail_fast):
 
     def op(name: str) -> RepoOpResult:
         repo = _make_repo(ws, name, feature_info)
+        if repo is None:
+            return RepoOpResult(repo=name, status=OpStatus.SKIPPED,
+                                message="not materialized")
         try:
             output = repo.pull()
             return RepoOpResult(
@@ -148,6 +157,9 @@ def push(feature, repos, fail_fast):
 
     def op(name: str) -> RepoOpResult:
         repo = _make_repo(ws, name, feature_info)
+        if repo is None:
+            return RepoOpResult(repo=name, status=OpStatus.SKIPPED,
+                                message="not materialized")
         try:
             if feature_info and name in feature_info.branches:
                 target = feature_info.branches[name]
@@ -180,6 +192,9 @@ def commit(message, feature, repos, fail_fast):
 
     def op(name: str) -> RepoOpResult:
         repo = _make_repo(ws, name, feature_info)
+        if repo is None:
+            return RepoOpResult(repo=name, status=OpStatus.SKIPPED,
+                                message="not materialized")
         try:
             output = repo.commit(message)
             if "nothing to commit" in output:
@@ -214,6 +229,9 @@ def exec_cmd(command, feature, repos, fail_fast):
 
     def op(name: str) -> RepoOpResult:
         repo = _make_repo(ws, name, feature_info)
+        if repo is None:
+            return RepoOpResult(repo=name, status=OpStatus.SKIPPED,
+                                message="not materialized")
         returncode, stdout, stderr = repo.exec(cmd_list)
         if returncode == 0:
             return RepoOpResult(

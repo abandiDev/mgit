@@ -35,6 +35,9 @@ def context(pretty):
                 "worktree_paths": {
                     name: str(path) for name, path in wt_paths.items()
                 },
+                "materialized": {
+                    name: path.exists() for name, path in wt_paths.items()
+                },
             }
         except Exception:
             pass
@@ -67,6 +70,9 @@ def context(pretty):
             "repos": list(f.branches.keys()),
             "worktree_paths": {
                 name: str(path) for name, path in wt_paths.items()
+            },
+            "materialized": {
+                name: path.exists() for name, path in wt_paths.items()
             },
         })
 

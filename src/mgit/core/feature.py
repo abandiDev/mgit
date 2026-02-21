@@ -149,30 +149,28 @@ class FeatureManager:
     def start(
         self,
         feature_name: str,
-        repo_names: list[str],
+        repo_names: list[str] | None = None,
         target_branch: str | None = None,
         description: str = "",
-        carry_repos: set[str] | None = None,
     ) -> tuple[FeatureInfo, list[str]]:
-        """Start working on a feature: create if needed, enroll repos, create worktrees.
+        """Start working on a feature: create if needed, enroll repos (no worktrees).
 
-        For each repo, creates an isolated worktree at
-        .mgit/worktrees/<feature>/<repo>/ on the sandbox branch.
+        Repos are enrolled as metadata only. Use work() to materialize
+        a worktree on demand.
 
         Args:
             feature_name: Name of the feature.
-            repo_names: List of repo names to enroll.
+            repo_names: List of repo names to enroll. None = enroll all workspace repos.
             target_branch: Remote target branch (default = feature name).
             description: Description (only used on initial creation).
-            carry_repos: Set of repo names whose uncommitted changes should be
-                carried to the new worktree via git stash. None means no carry.
 
         Returns:
             Tuple of (feature, list_of_newly_added_repo_names).
         """
         target = target_branch or feature_name
-        sb = sandbox_branch(feature_name)
-        carry = carry_repos or set()
+
+        # Default to all workspace repos
+        names = repo_names if repo_names is not None else list(self.ws.repos.keys())
 
         # Get or create feature
         try:
@@ -182,35 +180,17 @@ class FeatureManager:
 
         newly_added: list[str] = []
 
-        for repo_name in repo_names:
+        for repo_name in names:
             # Validate repo exists
             if repo_name not in self.ws.repos:
                 raise RepoNotFoundError(
                     f"Repo '{repo_name}' not found in workspace"
                 )
 
-            wt_path = self.ws.worktree_path(feature_name, repo_name)
-
             # Enroll in feature if not already
             if repo_name not in feature.branches:
                 feature.branches[repo_name] = target
                 newly_added.append(repo_name)
-
-            # Create worktree if it doesn't already exist
-            if not wt_path.exists():
-                repo = Repo(self.ws.get_repo(repo_name), self.ws.root)
-
-                # Stash changes before creating worktree if carrying
-                stashed = False
-                if repo_name in carry:
-                    stashed = repo.stash_push(f"mgit-carry:{feature_name}")
-
-                wt_path.parent.mkdir(parents=True, exist_ok=True)
-                repo.add_worktree(wt_path, sb)
-
-                # Pop stash in the worktree if we stashed something
-                if stashed:
-                    git.run_git("stash", "pop", cwd=wt_path)
 
         # Save feature state
         self._save_feature(feature)
@@ -219,6 +199,55 @@ class FeatureManager:
         self.ws.set_active_feature(feature_name)
 
         return feature, newly_added
+
+    def work(self, feature_name: str, repo_name: str, carry: bool = False) -> Path:
+        """Materialize a single repo's worktree for an existing feature.
+
+        Args:
+            feature_name: Name of the feature.
+            repo_name: Name of the repo to materialize.
+            carry: If True, stash uncommitted changes from original repo
+                and pop them into the new worktree.
+
+        Returns:
+            Path to the worktree directory.
+
+        Raises:
+            FeatureNotFoundError: If feature doesn't exist.
+            RepoNotFoundError: If repo is not enrolled in the feature.
+        """
+        feature = self.get(feature_name)
+        if repo_name not in feature.branches:
+            raise RepoNotFoundError(
+                f"Repo '{repo_name}' not enrolled in feature '{feature_name}'"
+            )
+
+        wt_path = self.ws.worktree_path(feature_name, repo_name)
+
+        # Idempotent: if already materialized, return existing path
+        if wt_path.exists():
+            return wt_path
+
+        sb = sandbox_branch(feature_name)
+        repo = Repo(self.ws.get_repo(repo_name), self.ws.root)
+
+        # Stash changes before creating worktree if carrying
+        stashed = False
+        if carry:
+            stashed = repo.stash_push(f"mgit-carry:{feature_name}")
+
+        wt_path.parent.mkdir(parents=True, exist_ok=True)
+        repo.add_worktree(wt_path, sb)
+
+        # Pop stash in the worktree if we stashed something
+        if stashed:
+            git.run_git("stash", "pop", cwd=wt_path)
+
+        return wt_path
+
+    def is_materialized(self, feature_name: str, repo_name: str) -> bool:
+        """Check if a repo's worktree has been materialized for a feature."""
+        return self.ws.worktree_path(feature_name, repo_name).exists()
 
     def switch(self, name: str) -> dict[str, Path]:
         """Set the active feature. Worktrees are always ready.

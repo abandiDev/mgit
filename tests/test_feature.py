@@ -74,6 +74,8 @@ class TestFeatureDelete:
         fm = FeatureManager(ws)
 
         fm.start("to-delete", ["repo-a", "repo-b"])
+        fm.work("to-delete", "repo-a")
+        fm.work("to-delete", "repo-b")
         wt_a = ws.worktree_path("to-delete", "repo-a")
         wt_b = ws.worktree_path("to-delete", "repo-b")
         assert wt_a.exists()
@@ -126,6 +128,7 @@ class TestFeatureRemoveRepo:
         ws = initialized_workspace
         fm = FeatureManager(ws)
         fm.start("feat", ["repo-a", "repo-b"])
+        fm.work("feat", "repo-a")
         fm.remove_repo("feat", "repo-a")
         feat = fm.get("feat")
         assert "repo-a" not in feat.branches
@@ -143,6 +146,8 @@ class TestFeatureRemoveRepo:
         fm = FeatureManager(ws)
 
         fm.start("feat", ["repo-a", "repo-b"])
+        fm.work("feat", "repo-a")
+        fm.work("feat", "repo-b")
         wt_a = ws.worktree_path("feat", "repo-a")
         assert wt_a.exists()
 
@@ -166,7 +171,7 @@ class TestFeatureStart:
         assert "repo-b" in feat.branches
         assert set(newly_added) == {"repo-a", "repo-b"}
 
-    def test_start_creates_worktree_dirs(self, initialized_workspace):
+    def test_start_does_not_create_worktree_dirs(self, initialized_workspace):
         ws = initialized_workspace
         fm = FeatureManager(ws)
 
@@ -174,20 +179,8 @@ class TestFeatureStart:
 
         wt_a = ws.worktree_path("my-feat", "repo-a")
         wt_b = ws.worktree_path("my-feat", "repo-b")
-        assert wt_a.exists()
-        assert wt_b.exists()
-        assert wt_a.is_dir()
-        assert wt_b.is_dir()
-
-    def test_start_worktree_has_sandbox_branch(self, initialized_workspace):
-        ws = initialized_workspace
-        fm = FeatureManager(ws)
-
-        fm.start("my-feat", ["repo-a"])
-
-        wt_path = ws.worktree_path("my-feat", "repo-a")
-        branch = git.get_current_branch(wt_path)
-        assert branch == "mgit/my-feat"
+        assert not wt_a.exists()
+        assert not wt_b.exists()
 
     def test_start_existing_feature_enrolls_more(self, initialized_workspace):
         ws = initialized_workspace
@@ -239,6 +232,10 @@ class TestFeatureStart:
         fm.start("feat-a", ["repo-a"])
         fm.start("feat-b", ["repo-a"])
 
+        # Materialize both
+        fm.work("feat-a", "repo-a")
+        fm.work("feat-b", "repo-a")
+
         wt_a = ws.worktree_path("feat-a", "repo-a")
         wt_b = ws.worktree_path("feat-b", "repo-a")
 
@@ -273,6 +270,27 @@ class TestFeatureStart:
 
         # Original repo should still be on its original branch
         assert repo.current_branch() == original_branch
+
+
+class TestStartEnrollsAll:
+    def test_start_enrolls_all_repos_by_default(self, initialized_workspace):
+        ws = initialized_workspace
+        fm = FeatureManager(ws)
+
+        feat, newly_added = fm.start("feat")
+
+        assert set(feat.branches.keys()) == set(ws.repos.keys())
+        assert set(newly_added) == set(ws.repos.keys())
+
+    def test_start_no_worktrees_created(self, initialized_workspace):
+        ws = initialized_workspace
+        fm = FeatureManager(ws)
+
+        fm.start("feat")
+
+        for repo_name in ws.repos:
+            wt_path = ws.worktree_path("feat", repo_name)
+            assert not wt_path.exists()
 
 
 class TestFeatureSwitch:
@@ -354,8 +372,47 @@ class TestFindDirtyRepos:
         assert result == []
 
 
-class TestFeatureStartCarry:
-    def test_start_carry_moves_changes_to_worktree(self, initialized_workspace):
+class TestFeatureWork:
+    def test_work_creates_worktree(self, initialized_workspace):
+        ws = initialized_workspace
+        fm = FeatureManager(ws)
+
+        fm.start("my-feat", ["repo-a"])
+        wt_path = fm.work("my-feat", "repo-a")
+
+        assert wt_path.exists()
+        assert wt_path.is_dir()
+        assert wt_path == ws.worktree_path("my-feat", "repo-a")
+
+    def test_work_worktree_has_sandbox_branch(self, initialized_workspace):
+        ws = initialized_workspace
+        fm = FeatureManager(ws)
+
+        fm.start("my-feat", ["repo-a"])
+        wt_path = fm.work("my-feat", "repo-a")
+
+        branch = git.get_current_branch(wt_path)
+        assert branch == "mgit/my-feat"
+
+    def test_work_idempotent(self, initialized_workspace):
+        ws = initialized_workspace
+        fm = FeatureManager(ws)
+
+        fm.start("my-feat", ["repo-a"])
+        path1 = fm.work("my-feat", "repo-a")
+        path2 = fm.work("my-feat", "repo-a")
+
+        assert path1 == path2
+
+    def test_work_unenrolled_repo_raises(self, initialized_workspace):
+        ws = initialized_workspace
+        fm = FeatureManager(ws)
+
+        fm.start("my-feat", ["repo-a"])
+        with pytest.raises(RepoNotFoundError):
+            fm.work("my-feat", "repo-b")
+
+    def test_work_carry_moves_changes_to_worktree(self, initialized_workspace):
         """Dirty file should appear in worktree, original should be clean."""
         ws = initialized_workspace
         fm = FeatureManager(ws)
@@ -366,17 +423,17 @@ class TestFeatureStartCarry:
 
         assert repo_a.is_dirty()
 
-        fm.start("carry-feat", ["repo-a"], carry_repos={"repo-a"})
+        fm.start("carry-feat", ["repo-a"])
+        wt_path = fm.work("carry-feat", "repo-a", carry=True)
 
         # Worktree should have the dirty file
-        wt_path = ws.worktree_path("carry-feat", "repo-a")
         assert (wt_path / "secret.txt").exists()
         assert (wt_path / "secret.txt").read_text() == "local-secret"
 
         # Original repo should be clean
         assert not repo_a.is_dirty()
 
-    def test_start_no_carry_worktree_is_clean(self, initialized_workspace):
+    def test_work_no_carry_worktree_is_clean(self, initialized_workspace):
         """Dirty file should stay in original, worktree should be clean."""
         ws = initialized_workspace
         fm = FeatureManager(ws)
@@ -386,39 +443,15 @@ class TestFeatureStartCarry:
         (repo_a.path / "secret.txt").write_text("local-secret")
 
         fm.start("no-carry-feat", ["repo-a"])
+        wt_path = fm.work("no-carry-feat", "repo-a")
 
         # Worktree should NOT have the dirty file
-        wt_path = ws.worktree_path("no-carry-feat", "repo-a")
         assert not (wt_path / "secret.txt").exists()
 
         # Original repo should still be dirty
         assert repo_a.is_dirty()
 
-    def test_start_carry_only_dirty_repos(self, initialized_workspace):
-        """Only dirty repos are carried; clean repos are unaffected."""
-        ws = initialized_workspace
-        fm = FeatureManager(ws)
-
-        # Make only repo-a dirty
-        repo_a = Repo(ws.get_repo("repo-a"), ws.root)
-        (repo_a.path / "dirty.txt").write_text("changes")
-
-        fm.start(
-            "mixed-feat", ["repo-a", "repo-b"],
-            carry_repos={"repo-a"},
-        )
-
-        wt_a = ws.worktree_path("mixed-feat", "repo-a")
-        wt_b = ws.worktree_path("mixed-feat", "repo-b")
-
-        # repo-a's worktree should have the file
-        assert (wt_a / "dirty.txt").exists()
-        # repo-b's worktree should be clean (just README)
-        assert not (wt_b / "dirty.txt").exists()
-        # Original repo-a should be clean
-        assert not repo_a.is_dirty()
-
-    def test_start_carry_untracked_files(self, initialized_workspace):
+    def test_work_carry_untracked_files(self, initialized_workspace):
         """Untracked files should also be carried via --include-untracked."""
         ws = initialized_workspace
         fm = FeatureManager(ws)
@@ -427,11 +460,28 @@ class TestFeatureStartCarry:
         repo_a = Repo(ws.get_repo("repo-a"), ws.root)
         (repo_a.path / "untracked.txt").write_text("new-file")
 
-        fm.start("untracked-feat", ["repo-a"], carry_repos={"repo-a"})
+        fm.start("untracked-feat", ["repo-a"])
+        wt_path = fm.work("untracked-feat", "repo-a", carry=True)
 
-        wt_path = ws.worktree_path("untracked-feat", "repo-a")
         assert (wt_path / "untracked.txt").exists()
         assert (wt_path / "untracked.txt").read_text() == "new-file"
 
         # Original should be clean
         assert not repo_a.is_dirty()
+
+
+class TestIsMaterialized:
+    def test_not_materialized_after_start(self, initialized_workspace):
+        ws = initialized_workspace
+        fm = FeatureManager(ws)
+
+        fm.start("feat", ["repo-a"])
+        assert not fm.is_materialized("feat", "repo-a")
+
+    def test_materialized_after_work(self, initialized_workspace):
+        ws = initialized_workspace
+        fm = FeatureManager(ws)
+
+        fm.start("feat", ["repo-a"])
+        fm.work("feat", "repo-a")
+        assert fm.is_materialized("feat", "repo-a")

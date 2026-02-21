@@ -1,4 +1,4 @@
-"""CLI commands: mgit feature {create,start,switch,activate,deactivate,show,list,delete,remove-repo}."""
+"""CLI commands: mgit feature {start,work,switch,activate,deactivate,show,list,delete,remove-repo}."""
 
 import click
 
@@ -16,94 +16,95 @@ def feature():
     """Manage cross-repo features."""
 
 
-@feature.command("create")
-@click.argument("name")
-@click.option("--description", "-d", default="", help="Feature description.")
-def create(name, description):
-    """Create an empty feature (for setting description upfront)."""
-    ws = Workspace.find()
-    fm = FeatureManager(ws)
-
-    try:
-        fm.create(name, description=description)
-    except MgitError as e:
-        raise click.ClickException(str(e))
-
-    ws.set_active_feature(name)
-    click.echo(f"Created feature '{name}'.")
-
-
 @feature.command("start")
 @click.argument("feature_name")
 @click.option(
     "--repo", "-r", "repo_names", multiple=True,
-    help="Repo name (can be repeated).",
+    help="Repo name (can be repeated). Omit to enroll all repos.",
 )
 @click.option("--branch", default=None, help="Remote target branch (default: feature name).")
 @click.option("--description", "-d", default="", help="Feature description (only on creation).")
-@click.option("--carry/--no-carry", default=None,
-              help="Carry uncommitted changes to the feature worktree.")
-def start(feature_name, repo_names, branch, description, carry):
-    """Start working on a feature: create/enroll repos and set up isolated worktrees.
+def start(feature_name, repo_names, branch, description):
+    """Start a feature: create/enroll repos as metadata (no worktrees yet).
 
-    If no -r is given, auto-detects repo from current directory.
-    Each enrolled repo gets a worktree at .mgit/worktrees/<feature>/<repo>/.
+    If no -r is given, enrolls all workspace repos.
+    Use 'mgit feature work <repo>' to materialize a worktree on demand.
     """
     ws = Workspace.find()
     fm = FeatureManager(ws)
 
-    repo_list = list(repo_names)
-
-    # Auto-detect repo from cwd if none specified
-    if not repo_list:
-        detected = ws.detect_repo_from_cwd()
-        if detected:
-            repo_list = [detected]
-        else:
-            raise click.ClickException(
-                "No repos specified and cwd is not inside a registered repo. "
-                "Use -r to specify repos."
-            )
-
-    # Detect dirty repos and resolve carry behavior
-    carry_repos: set[str] | None = None
-    if carry is not False:
-        dirty = find_dirty_repos(ws, repo_list)
-        if dirty:
-            if carry is None:
-                # No flag — prompt
-                click.echo("Repos with uncommitted changes:")
-                for name, br in dirty:
-                    click.echo(f"  {name} (on {br})")
-                do_carry = click.confirm(
-                    "Carry changes to the feature worktree?", default=False
-                )
-            else:
-                do_carry = True  # --carry flag
-
-            if do_carry:
-                carry_repos = {name for name, _ in dirty}
+    repo_list = list(repo_names) if repo_names else None
 
     try:
         feat, newly_added = fm.start(
             feature_name, repo_list,
             target_branch=branch,
             description=description,
-            carry_repos=carry_repos,
         )
     except MgitError as e:
         raise click.ClickException(str(e))
 
-    carried = carry_repos or set()
-    for repo_name in repo_list:
-        wt_path = ws.worktree_path(feature_name, repo_name)
-        suffix = " (changes carried)" if repo_name in carried else ""
-        if repo_name in newly_added:
-            click.echo(f"  {repo_name}: enrolled -> {wt_path}{suffix}")
-        else:
-            click.echo(f"  {repo_name}: -> {wt_path}{suffix}")
+    total = len(feat.branches)
+    new_count = len(newly_added)
 
+    click.echo(f"Feature '{feature_name}': {new_count} newly enrolled, {total} total.")
+    for repo_name in newly_added:
+        click.echo(f"  + {repo_name}")
     click.echo(f"Active feature: {feature_name}")
+    click.echo()
+    click.echo("Use 'mgit feature work <repo>' to materialize a worktree.")
+
+
+@feature.command("work")
+@click.argument("repo_name", required=False)
+@click.option("--carry/--no-carry", default=None,
+              help="Carry uncommitted changes to the feature worktree.")
+def work(repo_name, carry):
+    """Materialize a worktree for a repo in the active feature.
+
+    If REPO_NAME is omitted, auto-detects from current directory.
+    """
+    ws = Workspace.find()
+    fm = FeatureManager(ws)
+
+    active = ws.get_active_feature()
+    if not active:
+        raise click.ClickException(
+            "No active feature. Use 'mgit feature start' first."
+        )
+
+    # Auto-detect repo from cwd if not specified
+    if not repo_name:
+        detected = ws.detect_repo_from_cwd()
+        if detected:
+            repo_name = detected
+        else:
+            raise click.ClickException(
+                "No repo specified and cwd is not inside a registered repo."
+            )
+
+    # Detect dirty repo and resolve carry behavior
+    do_carry = False
+    if carry is not False:
+        dirty = find_dirty_repos(ws, [repo_name])
+        if dirty:
+            if carry is None:
+                # No flag — prompt
+                _, br = dirty[0]
+                click.echo(f"  {repo_name} has uncommitted changes (on {br})")
+                do_carry = click.confirm(
+                    "Carry changes to the feature worktree?", default=False
+                )
+            else:
+                do_carry = True  # --carry flag
+
+    try:
+        wt_path = fm.work(active, repo_name, carry=do_carry)
+    except MgitError as e:
+        raise click.ClickException(str(e))
+
+    suffix = " (changes carried)" if do_carry else ""
+    click.echo(f"  {repo_name}: materialized -> {wt_path}/{suffix}")
 
 
 @feature.command("switch")
@@ -170,7 +171,8 @@ def show(name):
     if f.branches:
         for repo, target in f.branches.items():
             wt_path = ws.worktree_path(name, repo)
-            click.echo(f"  {repo:<20} -> {target}  ({wt_path})")
+            mat = "*" if wt_path.exists() else " "
+            click.echo(f"  {mat} {repo:<20} -> {target}  ({wt_path})")
     else:
         click.echo("  (none)")
 
