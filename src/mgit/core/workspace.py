@@ -16,6 +16,32 @@ from mgit.utils.errors import (
 MGIT_DIR = ".mgit"
 CONFIG_FILE = "config.toml"
 FEATURES_DIR = "features"
+ACTIVE_FILE = "active"
+
+AGENT_MD_TEMPLATE = """\
+# mgit Workspace
+
+This is an mgit multi-repo workspace. Use `mgit` commands to manage repos and features.
+
+## Quick Reference
+
+Run `mgit context` for full workspace state as JSON.
+
+### Feature Workflow
+```
+mgit feature start <name> -r <repo1> -r <repo2>   # Create/join feature + sandbox branches
+mgit status -f <name>                               # Status across feature repos
+mgit commit -m "message" -f <name>                  # Commit across feature repos
+mgit push -f <name>                                 # Push feature branches to remote
+mgit feature switch <name>                          # Switch features (auto-stashes)
+```
+
+### Conventions
+- Sandbox branches: `mgit/<feature-name>` (local only, created automatically)
+- Remote branches: created at push time, named after the feature
+- Scope bulk commands with `-f <feature>` or `-f .` (active feature)
+- Changes are auto-stashed when switching features
+"""
 
 
 class Workspace:
@@ -76,6 +102,10 @@ class Workspace:
         ws.mgit_dir.mkdir()
         ws.features_dir.mkdir()
         ws.save()
+
+        # Generate AGENT.md in workspace root
+        agent_md_path = path / "AGENT.md"
+        agent_md_path.write_text(AGENT_MD_TEMPLATE)
 
         found_repos: list[RepoInfo] = []
         if scan:
@@ -147,3 +177,48 @@ class Workspace:
         p = self.root / repo.path
         # Resolve symlinks for git operations
         return p.resolve() if p.is_symlink() else p
+
+    # --- Active feature tracking ---
+
+    def get_active_feature(self) -> str | None:
+        """Read the active feature name from .mgit/active, or None."""
+        active_path = self.mgit_dir / ACTIVE_FILE
+        if active_path.exists():
+            text = active_path.read_text().strip()
+            return text if text else None
+        return None
+
+    def set_active_feature(self, name: str) -> None:
+        """Write the active feature name to .mgit/active."""
+        active_path = self.mgit_dir / ACTIVE_FILE
+        active_path.write_text(name)
+
+    def clear_active_feature(self) -> None:
+        """Delete .mgit/active."""
+        active_path = self.mgit_dir / ACTIVE_FILE
+        if active_path.exists():
+            active_path.unlink()
+
+    def detect_repo_from_cwd(self, cwd: Path | None = None) -> str | None:
+        """Determine which registered repo contains cwd (deepest match).
+
+        Returns the repo name, or None if cwd is not inside any registered repo.
+        """
+        target = (cwd or Path.cwd()).resolve()
+        best_match: str | None = None
+        best_depth = -1
+
+        for name, repo_info in self.repos.items():
+            repo_abs = (self.root / repo_info.path).resolve()
+            try:
+                rel = target.relative_to(repo_abs)
+                depth = len(rel.parts)
+                # depth 0 means cwd IS the repo root; more parts = deeper
+                # We want the deepest match (most specific repo path)
+                if best_match is None or len(repo_abs.parts) > best_depth:
+                    best_match = name
+                    best_depth = len(repo_abs.parts)
+            except ValueError:
+                continue
+
+        return best_match

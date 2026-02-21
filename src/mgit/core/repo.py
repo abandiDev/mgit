@@ -88,6 +88,60 @@ class Repo:
         )
         return result.returncode, result.stdout, result.stderr
 
+    # --- Stash operations ---
+
+    def stash_push(self, message: str) -> bool:
+        """Stash dirty changes (including untracked files) with a message.
+
+        Returns True if something was stashed, False if working tree was clean.
+        """
+        if not self.is_dirty():
+            return False
+        git.run_git("stash", "push", "-u", "-m", message, cwd=self.path)
+        return True
+
+    def stash_pop_by_message(self, message: str) -> bool:
+        """Find and pop a stash entry by its message.
+
+        Scans `git stash list` for an entry matching the message and pops it.
+        Returns True if a matching stash was found and popped.
+        """
+        result = git.run_git("stash", "list", cwd=self.path, check=False)
+        if result.returncode != 0 or not result.stdout.strip():
+            return False
+
+        for line in result.stdout.strip().splitlines():
+            # Format: stash@{N}: On branch: message
+            if message in line:
+                # Extract stash ref (e.g., "stash@{0}")
+                stash_ref = line.split(":")[0].strip()
+                git.run_git("stash", "pop", stash_ref, cwd=self.path)
+                return True
+
+        return False
+
+    # --- Refspec push ---
+
+    def push_to_target(self, target_branch: str) -> str:
+        """Push current branch to a different remote branch name.
+
+        Uses `git push -u origin <current>:<target>` so the first push
+        sets tracking; subsequent push/pull work normally.
+        """
+        current = self.current_branch()
+        refspec = f"{current}:{target_branch}"
+        result = git.run_git(
+            "push", "-u", "origin", refspec, cwd=self.path, check=False
+        )
+        if result.returncode != 0:
+            from mgit.utils.errors import GitError
+            raise GitError(
+                f"push failed: {result.stderr.strip()}",
+                returncode=result.returncode,
+                stderr=result.stderr.strip(),
+            )
+        return result.stdout + result.stderr
+
 
 def add_repo_from_url(
     workspace_root: Path, url: str, name: str | None = None

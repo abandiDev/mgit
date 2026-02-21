@@ -52,6 +52,16 @@ class TestWorkspaceInit:
         assert len(found) == 0
         assert len(ws.repos) == 0
 
+    def test_init_generates_agent_md(self, tmp_workspace):
+        ws, _ = Workspace.init(tmp_workspace)
+        agent_md = tmp_workspace / "AGENT.md"
+        assert agent_md.exists()
+        content = agent_md.read_text()
+        assert "mgit Workspace" in content
+        assert "mgit context" in content
+        assert "mgit feature start" in content
+        assert "sandbox branches" in content.lower() or "Sandbox branches" in content
+
 
 class TestWorkspaceFind:
     def test_find_from_root(self, initialized_workspace):
@@ -123,3 +133,54 @@ class TestWorkspaceRepoManagement:
         for name in ws.repos:
             assert ws2.repos[name].path == ws.repos[name].path
             assert ws2.repos[name].default_branch == ws.repos[name].default_branch
+
+
+class TestActiveFeature:
+    def test_get_active_feature_none(self, initialized_workspace):
+        ws = initialized_workspace
+        assert ws.get_active_feature() is None
+
+    def test_set_and_get_active_feature(self, initialized_workspace):
+        ws = initialized_workspace
+        ws.set_active_feature("my-feature")
+        assert ws.get_active_feature() == "my-feature"
+
+    def test_clear_active_feature(self, initialized_workspace):
+        ws = initialized_workspace
+        ws.set_active_feature("my-feature")
+        ws.clear_active_feature()
+        assert ws.get_active_feature() is None
+
+    def test_clear_when_no_active(self, initialized_workspace):
+        ws = initialized_workspace
+        # Should not raise
+        ws.clear_active_feature()
+        assert ws.get_active_feature() is None
+
+    def test_active_feature_persists(self, initialized_workspace):
+        ws = initialized_workspace
+        ws.set_active_feature("persistent")
+        # Re-read from filesystem
+        ws2 = Workspace.find(ws.root)
+        assert ws2.get_active_feature() == "persistent"
+
+
+class TestDetectRepoFromCwd:
+    def test_detect_from_repo_root(self, initialized_workspace):
+        ws = initialized_workspace
+        cwd = ws.root / "repo-a"
+        assert ws.detect_repo_from_cwd(cwd) == "repo-a"
+
+    def test_detect_from_subdirectory(self, initialized_workspace):
+        ws = initialized_workspace
+        sub = ws.root / "repo-a" / "subdir"
+        sub.mkdir(parents=True, exist_ok=True)
+        assert ws.detect_repo_from_cwd(sub) == "repo-a"
+
+    def test_detect_from_workspace_root(self, initialized_workspace):
+        ws = initialized_workspace
+        assert ws.detect_repo_from_cwd(ws.root) is None
+
+    def test_detect_from_outside_workspace(self, initialized_workspace, tmp_path):
+        ws = initialized_workspace
+        assert ws.detect_repo_from_cwd(tmp_path) is None

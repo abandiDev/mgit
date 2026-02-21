@@ -1,20 +1,10 @@
-"""CLI commands: mgit feature {create,delete,list,show,switch,add-repo,remove-repo}."""
+"""CLI commands: mgit feature {create,start,switch,activate,deactivate,show,list,delete,remove-repo}."""
 
 import click
 
-from mgit.core.feature import FeatureManager
+from mgit.core.feature import FeatureManager, sandbox_branch
 from mgit.core.workspace import Workspace
 from mgit.utils.errors import MgitError
-
-
-def _parse_repo_branch(value: str) -> tuple[str, str]:
-    """Parse 'repo:branch' string."""
-    if ":" not in value:
-        raise click.BadParameter(
-            f"Expected 'repo:branch' format, got '{value}'"
-        )
-    repo, branch = value.split(":", 1)
-    return repo.strip(), branch.strip()
 
 
 @click.group()
@@ -24,59 +14,108 @@ def feature():
 
 @feature.command("create")
 @click.argument("name")
-@click.option(
-    "--repo", "-r", "repo_branches", multiple=True, required=True,
-    help="Repo:branch pair (can be repeated).",
-)
 @click.option("--description", "-d", default="", help="Feature description.")
-def create(name, repo_branches, description):
-    """Create a new feature with repo:branch mappings."""
+def create(name, description):
+    """Create an empty feature (for setting description upfront)."""
     ws = Workspace.find()
     fm = FeatureManager(ws)
 
-    branches = {}
-    for rb in repo_branches:
-        try:
-            repo, branch = _parse_repo_branch(rb)
-        except click.BadParameter as e:
-            raise click.ClickException(str(e))
-        branches[repo] = branch
-
     try:
-        fm.create(name, branches, description=description)
+        fm.create(name, description=description)
     except MgitError as e:
         raise click.ClickException(str(e))
 
-    click.echo(f"Created feature '{name}' with {len(branches)} repo(s).")
+    ws.set_active_feature(name)
+    click.echo(f"Created feature '{name}'.")
 
 
-@feature.command("delete")
+@feature.command("start")
+@click.argument("feature_name")
+@click.option(
+    "--repo", "-r", "repo_names", multiple=True,
+    help="Repo name (can be repeated).",
+)
+@click.option("--branch", default=None, help="Remote target branch (default: feature name).")
+@click.option("--description", "-d", default="", help="Feature description (only on creation).")
+def start(feature_name, repo_names, branch, description):
+    """Start working on a feature: create/enroll repos and switch to sandbox branches.
+
+    If no -r is given, auto-detects repo from current directory.
+    """
+    ws = Workspace.find()
+    fm = FeatureManager(ws)
+
+    repo_list = list(repo_names)
+
+    # Auto-detect repo from cwd if none specified
+    if not repo_list:
+        detected = ws.detect_repo_from_cwd()
+        if detected:
+            repo_list = [detected]
+        else:
+            raise click.ClickException(
+                "No repos specified and cwd is not inside a registered repo. "
+                "Use -r to specify repos."
+            )
+
+    try:
+        feat, newly_added = fm.start(
+            feature_name, repo_list,
+            target_branch=branch,
+            description=description,
+        )
+    except MgitError as e:
+        raise click.ClickException(str(e))
+
+    sb = sandbox_branch(feature_name)
+    for repo_name in repo_list:
+        if repo_name in newly_added:
+            click.echo(f"  {repo_name}: enrolled, on {sb}")
+        else:
+            click.echo(f"  {repo_name}: on {sb}")
+
+    click.echo(f"Active feature: {feature_name}")
+
+
+@feature.command("switch")
 @click.argument("name")
-def delete(name):
-    """Delete a feature definition."""
+def switch(name):
+    """Switch all enrolled repos to feature's sandbox branches (auto-stash/unstash)."""
     ws = Workspace.find()
     fm = FeatureManager(ws)
     try:
-        fm.delete(name)
+        switched = fm.switch(name)
     except MgitError as e:
         raise click.ClickException(str(e))
-    click.echo(f"Deleted feature '{name}'.")
+
+    for repo_name, branch in switched.items():
+        click.echo(f"  {repo_name}: switched to {branch}")
+    click.echo(f"Active feature: {name}")
 
 
-@feature.command("list")
-def list_features():
-    """List all features."""
+@feature.command("activate")
+@click.argument("name")
+def activate(name):
+    """Set the active feature without switching branches."""
     ws = Workspace.find()
     fm = FeatureManager(ws)
-    features = fm.list()
-    if not features:
-        click.echo("No features defined. Use 'mgit feature create' to create one.")
-        return
 
-    for f in features:
-        repos = ", ".join(f.branches.keys())
-        desc = f" - {f.description}" if f.description else ""
-        click.echo(f"  {f.name}{desc}  [{repos}]")
+    # Validate feature exists
+    try:
+        fm.get(name)
+    except MgitError as e:
+        raise click.ClickException(str(e))
+
+    ws.set_active_feature(name)
+    click.echo(f"Active feature: {name}")
+
+
+@feature.command("deactivate")
+def deactivate():
+    """Clear the active feature."""
+    ws = Workspace.find()
+    ws.clear_active_feature()
+    click.echo("No active feature.")
 
 
 @feature.command("show")
@@ -90,43 +129,51 @@ def show(name):
     except MgitError as e:
         raise click.ClickException(str(e))
 
-    click.echo(f"Feature: {f.name}")
+    active = ws.get_active_feature()
+    active_marker = " (active)" if active == name else ""
+
+    click.echo(f"Feature: {f.name}{active_marker}")
     if f.description:
         click.echo(f"Description: {f.description}")
-    click.echo("Branches:")
-    for repo, branch in f.branches.items():
-        click.echo(f"  {repo:<20} -> {branch}")
+    click.echo(f"Sandbox branch: {sandbox_branch(name)}")
+    click.echo("Repos:")
+    if f.branches:
+        for repo, target in f.branches.items():
+            click.echo(f"  {repo:<20} -> {target}")
+    else:
+        click.echo("  (none)")
 
 
-@feature.command("switch")
+@feature.command("list")
+def list_features():
+    """List all features."""
+    ws = Workspace.find()
+    fm = FeatureManager(ws)
+    features = fm.list()
+    active = ws.get_active_feature()
+
+    if not features:
+        click.echo("No features defined. Use 'mgit feature start' to create one.")
+        return
+
+    for f in features:
+        marker = "* " if f.name == active else "  "
+        repos = ", ".join(f.branches.keys()) if f.branches else "(no repos)"
+        desc = f" - {f.description}" if f.description else ""
+        click.echo(f"{marker}{f.name}{desc}  [{repos}]")
+
+
+@feature.command("delete")
 @click.argument("name")
-def switch(name):
-    """Switch all repos in a feature to their feature branches."""
+def delete(name):
+    """Delete a feature definition."""
     ws = Workspace.find()
     fm = FeatureManager(ws)
     try:
-        switched = fm.switch(name)
+        fm.delete(name)
     except MgitError as e:
         raise click.ClickException(str(e))
-
-    for repo, branch in switched.items():
-        click.echo(f"  {repo}: switched to {branch}")
-    click.echo(f"Switched {len(switched)} repo(s).")
-
-
-@feature.command("add-repo")
-@click.argument("feature_name")
-@click.argument("repo_branch")
-def add_repo(feature_name, repo_branch):
-    """Add a repo:branch mapping to a feature."""
-    ws = Workspace.find()
-    fm = FeatureManager(ws)
-    try:
-        repo, branch = _parse_repo_branch(repo_branch)
-        fm.add_repo(feature_name, repo, branch)
-    except (MgitError, click.BadParameter) as e:
-        raise click.ClickException(str(e))
-    click.echo(f"Added {repo}:{branch} to feature '{feature_name}'.")
+    click.echo(f"Deleted feature '{name}'.")
 
 
 @feature.command("remove-repo")

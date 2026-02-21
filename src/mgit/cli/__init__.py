@@ -28,11 +28,13 @@ def cli():
 from mgit.cli.workspace import init  # noqa: E402
 from mgit.cli.repo import repo  # noqa: E402
 from mgit.cli.feature import feature  # noqa: E402
+from mgit.cli.context import context  # noqa: E402
 from mgit.cli.bulk import status, pull, push, commit, exec_cmd  # noqa: E402
 
 main.add_command(init)
 main.add_command(repo)
 main.add_command(feature)
+main.add_command(context)
 main.add_command(status)
 main.add_command(pull)
 main.add_command(push)

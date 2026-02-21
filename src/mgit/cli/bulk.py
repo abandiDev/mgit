@@ -15,15 +15,34 @@ from mgit.utils.errors import MgitError
 from mgit.utils.parallel import run_bulk
 
 
+def _resolve_feature_name(ws: Workspace, feature_name: str) -> str:
+    """Resolve '.' to the active feature name."""
+    if feature_name == ".":
+        active = ws.get_active_feature()
+        if not active:
+            raise click.ClickException(
+                "No active feature. Use 'mgit feature start' or 'mgit feature activate' first."
+            )
+        return active
+    return feature_name
+
+
 def _resolve_repos(ws: Workspace, feature_name: str | None, repos_csv: str | None) -> list[str]:
     """Determine which repos to operate on."""
     if feature_name:
+        resolved = _resolve_feature_name(ws, feature_name)
         fm = FeatureManager(ws)
         try:
-            feat = fm.get(feature_name)
+            feat = fm.get(resolved)
         except MgitError as e:
             raise click.ClickException(str(e))
-        return list(feat.branches.keys())
+        repo_names = list(feat.branches.keys())
+        if not repo_names:
+            raise click.ClickException(
+                f"Feature '{resolved}' has no enrolled repos. "
+                "Use 'mgit feature start' to enroll repos."
+            )
+        return repo_names
     elif repos_csv:
         names = [n.strip() for n in repos_csv.split(",")]
         for n in names:
@@ -36,7 +55,7 @@ def _resolve_repos(ws: Workspace, feature_name: str | None, repos_csv: str | Non
 
 def _common_options(f):
     """Shared options for bulk commands."""
-    f = click.option("--feature", "-f", default=None, help="Scope to a feature's repos.")(f)
+    f = click.option("--feature", "-f", default=None, help="Scope to a feature's repos (use '.' for active).")(f)
     f = click.option("--repos", "-r", default=None, help="Comma-separated repo names.")(f)
     f = click.option("--fail-fast", is_flag=True, help="Stop on first failure.")(f)
     return f
@@ -98,14 +117,25 @@ def pull(feature, repos, fail_fast):
 @click.command("push")
 @_common_options
 def push(feature, repos, fail_fast):
-    """Push across repos."""
+    """Push across repos. When -f is used, pushes sandbox branches to target remote branches."""
     ws = Workspace.find()
     repo_names = _resolve_repos(ws, feature, repos)
+
+    # If scoped to a feature, use push_to_target with refspec
+    feature_info = None
+    if feature:
+        resolved = _resolve_feature_name(ws, feature)
+        fm = FeatureManager(ws)
+        feature_info = fm.get(resolved)
 
     def op(name: str) -> RepoOpResult:
         repo = Repo(ws.get_repo(name), ws.root)
         try:
-            output = repo.push()
+            if feature_info and name in feature_info.branches:
+                target = feature_info.branches[name]
+                output = repo.push_to_target(target)
+            else:
+                output = repo.push()
             return RepoOpResult(
                 repo=name, status=OpStatus.SUCCESS,
                 message="pushed", output=output,
