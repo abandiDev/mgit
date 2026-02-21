@@ -2,9 +2,47 @@
 
 import click
 
-from mgit.core.feature import FeatureManager, sandbox_branch
+from mgit.core.feature import (
+    FeatureManager,
+    find_dirty_non_sandbox_repos,
+    sandbox_branch,
+)
 from mgit.core.workspace import Workspace
 from mgit.utils.errors import MgitError
+
+
+def _prompt_dirty_action(dirty_repos: list[tuple[str, str]]) -> str:
+    """Show dirty non-sandbox repos and ask the user what to do.
+
+    Returns "stash" or "carry".
+    """
+    click.echo("Repos with uncommitted changes:")
+    for name, branch in dirty_repos:
+        click.echo(f"  {name} (on {branch})")
+    click.echo()
+    choice = click.prompt(
+        "Stash these changes or carry them to the feature branch?",
+        type=click.Choice(["stash", "carry"], case_sensitive=False),
+        default="stash",
+    )
+    return choice.lower()
+
+
+def _resolve_dirty_action(
+    stash_flag: bool, carry_flag: bool,
+    dirty_repos: list[tuple[str, str]],
+) -> str:
+    """Determine dirty_action from flags or by prompting.
+
+    Returns "stash" or "carry".
+    """
+    if stash_flag:
+        return "stash"
+    if carry_flag:
+        return "carry"
+    if dirty_repos:
+        return _prompt_dirty_action(dirty_repos)
+    return "carry"
 
 
 @click.group()
@@ -37,11 +75,18 @@ def create(name, description):
 )
 @click.option("--branch", default=None, help="Remote target branch (default: feature name).")
 @click.option("--description", "-d", default="", help="Feature description (only on creation).")
-def start(feature_name, repo_names, branch, description):
+@click.option("--stash", "stash_flag", is_flag=True, help="Stash uncommitted changes before switching.")
+@click.option("--carry", "carry_flag", is_flag=True, help="Carry uncommitted changes to the feature branch.")
+def start(feature_name, repo_names, branch, description, stash_flag, carry_flag):
     """Start working on a feature: create/enroll repos and switch to sandbox branches.
 
     If no -r is given, auto-detects repo from current directory.
+    If repos have uncommitted changes on non-feature branches, prompts to stash or carry
+    (use --stash or --carry to skip the prompt).
     """
+    if stash_flag and carry_flag:
+        raise click.ClickException("Cannot use both --stash and --carry.")
+
     ws = Workspace.find()
     fm = FeatureManager(ws)
 
@@ -58,11 +103,16 @@ def start(feature_name, repo_names, branch, description):
                 "Use -r to specify repos."
             )
 
+    # Check for dirty repos on non-sandbox branches
+    dirty_repos = find_dirty_non_sandbox_repos(ws, repo_list)
+    dirty_action = _resolve_dirty_action(stash_flag, carry_flag, dirty_repos)
+
     try:
         feat, newly_added = fm.start(
             feature_name, repo_list,
             target_branch=branch,
             description=description,
+            dirty_action=dirty_action,
         )
     except MgitError as e:
         raise click.ClickException(str(e))
@@ -79,17 +129,37 @@ def start(feature_name, repo_names, branch, description):
 
 @feature.command("switch")
 @click.argument("name")
-def switch(name):
-    """Switch all enrolled repos to feature's sandbox branches (auto-stash/unstash)."""
+@click.option("--stash", "stash_flag", is_flag=True, help="Stash uncommitted changes before switching.")
+@click.option("--carry", "carry_flag", is_flag=True, help="Carry uncommitted changes to the feature branch.")
+def switch(name, stash_flag, carry_flag):
+    """Switch all enrolled repos to feature's sandbox branches (auto-stash/unstash).
+
+    If repos have uncommitted changes on non-feature branches, prompts to stash or carry
+    (use --stash or --carry to skip the prompt).
+    """
+    if stash_flag and carry_flag:
+        raise click.ClickException("Cannot use both --stash and --carry.")
+
     ws = Workspace.find()
     fm = FeatureManager(ws)
+
+    # Load feature to get enrolled repos
     try:
-        switched = fm.switch(name)
+        feat = fm.get(name)
     except MgitError as e:
         raise click.ClickException(str(e))
 
-    for repo_name, branch in switched.items():
-        click.echo(f"  {repo_name}: switched to {branch}")
+    # Check for dirty repos on non-sandbox branches
+    dirty_repos = find_dirty_non_sandbox_repos(ws, list(feat.branches.keys()))
+    dirty_action = _resolve_dirty_action(stash_flag, carry_flag, dirty_repos)
+
+    try:
+        switched = fm.switch(name, dirty_action=dirty_action)
+    except MgitError as e:
+        raise click.ClickException(str(e))
+
+    for repo_name, branch_name in switched.items():
+        click.echo(f"  {repo_name}: switched to {branch_name}")
     click.echo(f"Active feature: {name}")
 
 

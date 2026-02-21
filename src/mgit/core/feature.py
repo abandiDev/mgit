@@ -20,6 +20,26 @@ def sandbox_branch(feature_name: str) -> str:
     return f"mgit/{feature_name}"
 
 
+def find_dirty_non_sandbox_repos(
+    ws: Workspace, repo_names: list[str],
+) -> list[tuple[str, str]]:
+    """Find repos that are dirty and NOT on a sandbox branch.
+
+    Returns list of (repo_name, current_branch) tuples.
+    These are the repos whose changes need an explicit stash-or-carry decision.
+    """
+    dirty = []
+    for name in repo_names:
+        if name not in ws.repos:
+            continue
+        repo = Repo(ws.get_repo(name), ws.root)
+        if repo.is_dirty():
+            branch = repo.current_branch()
+            if not branch.startswith("mgit/"):
+                dirty.append((name, branch))
+    return dirty
+
+
 class FeatureManager:
     """Manages feature lifecycle within a workspace."""
 
@@ -106,6 +126,7 @@ class FeatureManager:
         repo_names: list[str],
         target_branch: str | None = None,
         description: str = "",
+        dirty_action: str = "carry",
     ) -> tuple[FeatureInfo, list[str]]:
         """Start working on a feature: create if needed, enroll repos, switch branches.
 
@@ -114,7 +135,9 @@ class FeatureManager:
         2. If feature exists -> load it
         3. For each repo:
            a. Validate repo exists
-           b. Auto-stash if dirty and on a different feature's sandbox branch
+           b. Handle dirty state:
+              - On a different feature's sandbox -> auto-stash (tagged to that feature)
+              - On a non-sandbox branch -> apply dirty_action
            c. Enroll in feature if not already
            d. Checkout sandbox branch
            e. Auto-unstash previous work on this feature
@@ -124,6 +147,9 @@ class FeatureManager:
             repo_names: List of repo names to enroll and switch.
             target_branch: Remote target branch (default = feature name).
             description: Description (only used on initial creation).
+            dirty_action: What to do with dirty repos not on a sandbox branch.
+                "stash" = stash changes before switching.
+                "carry" = bring changes to the new branch.
 
         Returns:
             Tuple of (feature, list_of_newly_added_repo_names).
@@ -147,12 +173,17 @@ class FeatureManager:
                 )
 
             repo = Repo(self.ws.get_repo(repo_name), self.ws.root)
-
-            # 3b. Auto-stash if dirty and on a DIFFERENT feature's sandbox
             current = repo.current_branch()
-            if repo.is_dirty() and current.startswith("mgit/") and current != sb:
-                old_feature = current.removeprefix("mgit/")
-                repo.stash_push(f"mgit:{old_feature}")
+
+            # 3b. Handle dirty state
+            if repo.is_dirty():
+                if current.startswith("mgit/") and current != sb:
+                    # On a different feature's sandbox -> auto-stash tagged to that feature
+                    old_feature = current.removeprefix("mgit/")
+                    repo.stash_push(f"mgit:{old_feature}")
+                elif not current.startswith("mgit/") and dirty_action == "stash":
+                    # On a non-sandbox branch, user chose stash
+                    repo.stash_push(f"mgit:branch:{current}")
 
             # 3c. Enroll in feature if not already
             if repo_name not in feature.branches:
@@ -173,11 +204,17 @@ class FeatureManager:
 
         return feature, newly_added
 
-    def switch(self, name: str) -> dict[str, str]:
+    def switch(self, name: str, dirty_action: str = "carry") -> dict[str, str]:
         """Switch all repos in a feature to their sandbox branches.
 
-        Auto-stashes dirty work on the old feature, auto-unstashes work
-        on the target feature.
+        Auto-stashes dirty work on the old feature's sandbox, asks about
+        dirty work on non-sandbox branches via dirty_action.
+
+        Args:
+            name: Feature name to switch to.
+            dirty_action: What to do with dirty repos not on a sandbox branch.
+                "stash" = stash changes before switching.
+                "carry" = bring changes to the new branch.
 
         Returns:
             Dict of repo_name -> sandbox_branch that were checked out.
@@ -189,12 +226,17 @@ class FeatureManager:
         switched = {}
         for repo_name in feature.branches:
             repo = Repo(self.ws.get_repo(repo_name), self.ws.root)
-
-            # Auto-stash if dirty and on old feature's sandbox
             current = repo.current_branch()
-            if repo.is_dirty() and old_active and current.startswith("mgit/"):
-                old_feature = current.removeprefix("mgit/")
-                repo.stash_push(f"mgit:{old_feature}")
+
+            # Handle dirty state
+            if repo.is_dirty():
+                if old_active and current.startswith("mgit/"):
+                    # On a feature's sandbox -> auto-stash tagged to that feature
+                    old_feature = current.removeprefix("mgit/")
+                    repo.stash_push(f"mgit:{old_feature}")
+                elif not current.startswith("mgit/") and dirty_action == "stash":
+                    # On a non-sandbox branch, user chose stash
+                    repo.stash_push(f"mgit:branch:{current}")
 
             # Checkout sandbox branch
             repo.checkout(sb)
