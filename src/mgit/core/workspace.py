@@ -30,19 +30,21 @@ Run `mgit context` for full workspace state as JSON.
 
 ### Feature Workflow
 ```
-mgit feature start <name>                           # Enroll all repos (metadata only, no worktrees)
-mgit feature start <name> -r <repo1> -r <repo2>    # Enroll specific repos only
+mgit feature start <name> -r <repo1> -r <repo2>    # Enroll specific repos (metadata only)
+mgit feature start <name> -r <repo1> --materialize  # Enroll and create worktrees immediately
 mgit feature work <repo>                            # Materialize a worktree on demand
 mgit feature work <repo> --carry                    # Materialize and carry uncommitted changes
-mgit status -f .                                    # Status across feature repos (skips unmaterialized)
+mgit feature sync                                   # Discover dirty repos, enroll + materialize them
+mgit status -f .                                    # Status across feature repos
 mgit commit -m "message" -f .                       # Commit across materialized repos
 mgit push -f .                                      # Push feature branches to remote
 mgit feature switch <name>                          # Set active feature
 ```
 
 ### Conventions
-- `feature start` enrolls repos as metadata — no disk worktrees are created
+- `feature start` enrolls repos as metadata — pass `--materialize` to create worktrees immediately
 - `feature work <repo>` materializes a single repo's worktree on demand
+- `feature sync` finds dirty repos in the workspace and enrolls them into the active feature
 - Bulk commands (`status`, `pull`, `push`, `commit`, `exec`) skip unmaterialized repos
 - Each feature gets isolated worktree directories at `.mgit/worktrees/<feature>/<repo>/`
 - Sandbox branches: `mgit/<feature-name>` (local only, created automatically)
