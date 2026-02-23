@@ -24,11 +24,13 @@ def feature():
 )
 @click.option("--branch", default=None, help="Remote target branch (default: feature name).")
 @click.option("--description", "-d", default="", help="Feature description (only on creation).")
-def start(feature_name, repo_names, branch, description):
-    """Start a feature: create/enroll repos as metadata (no worktrees yet).
+@click.option("--materialize", "-m", is_flag=True, default=False,
+              help="Materialize worktrees immediately (auto-carries dirty changes).")
+def start(feature_name, repo_names, branch, description, materialize):
+    """Start a feature: create/enroll repos.
 
     If no -r is given, enrolls all workspace repos.
-    Use 'mgit feature work <repo>' to materialize a worktree on demand.
+    Pass --materialize to create worktrees immediately.
     """
     ws = Workspace.find()
     fm = FeatureManager(ws)
@@ -40,6 +42,7 @@ def start(feature_name, repo_names, branch, description):
             feature_name, repo_list,
             target_branch=branch,
             description=description,
+            materialize=materialize,
         )
     except MgitError as e:
         raise click.ClickException(str(e))
@@ -49,10 +52,15 @@ def start(feature_name, repo_names, branch, description):
 
     click.echo(f"Feature '{feature_name}': {new_count} newly enrolled, {total} total.")
     for repo_name in newly_added:
-        click.echo(f"  + {repo_name}")
+        if materialize:
+            wt_path = ws.worktree_path(feature_name, repo_name)
+            click.echo(f"  + {repo_name}: {wt_path}/")
+        else:
+            click.echo(f"  + {repo_name}")
     click.echo(f"Active feature: {feature_name}")
-    click.echo()
-    click.echo("Use 'mgit feature work <repo>' to materialize a worktree.")
+    if not materialize:
+        click.echo()
+        click.echo("Use 'mgit feature work <repo>' to materialize a worktree.")
 
 
 @feature.command("work")

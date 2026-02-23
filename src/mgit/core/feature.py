@@ -152,17 +152,17 @@ class FeatureManager:
         repo_names: list[str] | None = None,
         target_branch: str | None = None,
         description: str = "",
+        materialize: bool = False,
     ) -> tuple[FeatureInfo, list[str]]:
-        """Start working on a feature: create if needed, enroll repos (no worktrees).
-
-        Repos are enrolled as metadata only. Use work() to materialize
-        a worktree on demand.
+        """Start working on a feature: create if needed, enroll repos.
 
         Args:
             feature_name: Name of the feature.
             repo_names: List of repo names to enroll. None = enroll all workspace repos.
             target_branch: Remote target branch (default = feature name).
             description: Description (only used on initial creation).
+            materialize: If True, create worktrees for newly enrolled repos
+                immediately, auto-carrying dirty changes.
 
         Returns:
             Tuple of (feature, list_of_newly_added_repo_names).
@@ -197,6 +197,14 @@ class FeatureManager:
 
         # Set as active feature
         self.ws.set_active_feature(feature_name)
+
+        # Materialize worktrees for newly enrolled repos if requested
+        if materialize and newly_added:
+            dirty_set = {
+                name for name, _ in find_dirty_repos(self.ws, newly_added)
+            }
+            for repo_name in newly_added:
+                self.work(feature_name, repo_name, carry=repo_name in dirty_set)
 
         return feature, newly_added
 

@@ -293,6 +293,36 @@ class TestStartEnrollsAll:
             assert not wt_path.exists()
 
 
+class TestStartMaterialize:
+    def test_start_materialize_creates_worktrees(self, initialized_workspace):
+        """start(materialize=True) should create worktrees for all enrolled repos."""
+        ws = initialized_workspace
+        fm = FeatureManager(ws)
+
+        fm.start("my-feat", ["repo-a", "repo-b"], materialize=True)
+
+        assert fm.is_materialized("my-feat", "repo-a")
+        assert fm.is_materialized("my-feat", "repo-b")
+
+    def test_start_materialize_carries_dirty_changes(self, initialized_workspace):
+        """Dirty changes should be carried into the worktree when materializing."""
+        ws = initialized_workspace
+        fm = FeatureManager(ws)
+
+        # Make repo-a dirty
+        repo_a = Repo(ws.get_repo("repo-a"), ws.root)
+        (repo_a.path / "wip.txt").write_text("work-in-progress")
+
+        fm.start("my-feat", ["repo-a"], materialize=True)
+
+        wt_path = ws.worktree_path("my-feat", "repo-a")
+        assert (wt_path / "wip.txt").exists()
+        assert (wt_path / "wip.txt").read_text() == "work-in-progress"
+
+        # Original repo should be clean
+        assert not repo_a.is_dirty()
+
+
 class TestFeatureSwitch:
     def test_switch_just_sets_active(self, initialized_workspace):
         """Switch should just set the active feature — no checkout happens."""
