@@ -107,6 +107,36 @@ def work(repo_name, carry):
     click.echo(f"  {repo_name}: materialized -> {wt_path}/{suffix}")
 
 
+@feature.command("sync")
+def sync():
+    """Discover dirty repos and enroll them into the active feature.
+
+    Scans all workspace repos for uncommitted changes, enrolls any that
+    aren't already part of the active feature, and materializes worktrees
+    carrying changes over.
+    """
+    ws = Workspace.find()
+    fm = FeatureManager(ws)
+
+    active = ws.get_active_feature()
+    if not active:
+        raise click.ClickException(
+            "No active feature. Use 'mgit feature start' first."
+        )
+
+    try:
+        synced = fm.sync(active)
+    except MgitError as e:
+        raise click.ClickException(str(e))
+
+    if synced:
+        click.echo(f"Synced {len(synced)} repo(s) into feature '{active}':")
+        for name in synced:
+            click.echo(f"  + {name} (changes carried)")
+    else:
+        click.echo("No new dirty repos to sync.")
+
+
 @feature.command("switch")
 @click.argument("name")
 def switch(name):

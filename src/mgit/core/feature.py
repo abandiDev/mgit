@@ -245,6 +245,35 @@ class FeatureManager:
 
         return wt_path
 
+    def sync(self, feature_name: str) -> list[str]:
+        """Discover dirty repos and enroll + materialize them into the feature.
+
+        Scans all workspace repos for uncommitted changes, enrolls any that
+        aren't already part of the feature, and materializes worktrees with
+        carry=True so changes are moved into the feature worktree.
+
+        Args:
+            feature_name: Name of the feature to sync into.
+
+        Returns:
+            List of newly synced repo names.
+        """
+        feature = self.get(feature_name)
+
+        all_repo_names = list(self.ws.repos.keys())
+        dirty = find_dirty_repos(self.ws, all_repo_names)
+
+        # Filter out repos already enrolled in the feature
+        new_dirty = [(name, branch) for name, branch in dirty if name not in feature.branches]
+
+        synced: list[str] = []
+        for repo_name, _ in new_dirty:
+            self.start(feature_name, [repo_name])
+            self.work(feature_name, repo_name, carry=True)
+            synced.append(repo_name)
+
+        return synced
+
     def is_materialized(self, feature_name: str, repo_name: str) -> bool:
         """Check if a repo's worktree has been materialized for a feature."""
         return self.ws.worktree_path(feature_name, repo_name).exists()

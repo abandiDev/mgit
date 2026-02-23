@@ -470,6 +470,75 @@ class TestFeatureWork:
         assert not repo_a.is_dirty()
 
 
+class TestFeatureSync:
+    def test_sync_finds_dirty_repos_and_enrolls(self, initialized_workspace):
+        """Sync should discover dirty repos, enroll them, and materialize worktrees."""
+        ws = initialized_workspace
+        fm = FeatureManager(ws)
+
+        # Start feature with only repo-a
+        fm.start("my-feat", ["repo-a"])
+
+        # Make repo-b dirty
+        repo_b = Repo(ws.get_repo("repo-b"), ws.root)
+        (repo_b.path / "new-file.txt").write_text("hello")
+
+        synced = fm.sync("my-feat")
+
+        assert synced == ["repo-b"]
+        feat = fm.get("my-feat")
+        assert "repo-b" in feat.branches
+        assert fm.is_materialized("my-feat", "repo-b")
+
+    def test_sync_skips_already_enrolled(self, initialized_workspace):
+        """Sync should not re-enroll repos already in the feature."""
+        ws = initialized_workspace
+        fm = FeatureManager(ws)
+
+        # Start feature with both repos
+        fm.start("my-feat", ["repo-a", "repo-b"])
+
+        # Make repo-a dirty
+        repo_a = Repo(ws.get_repo("repo-a"), ws.root)
+        (repo_a.path / "change.txt").write_text("change")
+
+        synced = fm.sync("my-feat")
+
+        assert synced == []
+
+    def test_sync_no_dirty_repos(self, initialized_workspace):
+        """Sync with no dirty repos should return empty list."""
+        ws = initialized_workspace
+        fm = FeatureManager(ws)
+
+        fm.start("my-feat", ["repo-a"])
+
+        synced = fm.sync("my-feat")
+
+        assert synced == []
+
+    def test_sync_carries_changes(self, initialized_workspace):
+        """Sync should carry uncommitted changes into the worktree."""
+        ws = initialized_workspace
+        fm = FeatureManager(ws)
+
+        fm.start("my-feat", ["repo-a"])
+
+        # Make repo-b dirty with a specific file
+        repo_b = Repo(ws.get_repo("repo-b"), ws.root)
+        (repo_b.path / "work.txt").write_text("in-progress")
+
+        fm.sync("my-feat")
+
+        # Changes should be in the worktree
+        wt_path = ws.worktree_path("my-feat", "repo-b")
+        assert (wt_path / "work.txt").exists()
+        assert (wt_path / "work.txt").read_text() == "in-progress"
+
+        # Original repo should be clean
+        assert not repo_b.is_dirty()
+
+
 class TestIsMaterialized:
     def test_not_materialized_after_start(self, initialized_workspace):
         ws = initialized_workspace
