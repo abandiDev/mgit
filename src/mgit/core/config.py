@@ -36,6 +36,8 @@ def workspace_config_to_dict(
         if repo.url:
             entry["url"] = repo.url
         entry["default_branch"] = repo.default_branch
+        if repo.setup:
+            entry["setup"] = repo.setup
         data["repos"][repo_name] = entry
     return data
 
@@ -49,6 +51,7 @@ def dict_to_repos(repos_dict: dict) -> dict[str, RepoInfo]:
             path=entry["path"],
             url=entry.get("url"),
             default_branch=entry.get("default_branch", "main"),
+            setup=entry.get("setup"),
         )
     return repos
 

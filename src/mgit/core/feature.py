@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 from pathlib import Path
 
 from mgit.core import config, git
@@ -146,6 +147,34 @@ class FeatureManager:
         self._save_feature(feature)
         return feature
 
+    def run_setup(self, repo_name: str, cwd: Path) -> tuple[bool, str]:
+        """Run the configured setup command for a repo.
+
+        Args:
+            repo_name: Name of the repo.
+            cwd: Directory to run the command in.
+
+        Returns:
+            Tuple of (success, output). Returns (True, "") if no setup configured.
+        """
+        repo_info = self.ws.get_repo(repo_name)
+        if not repo_info.setup:
+            return True, ""
+
+        try:
+            result = subprocess.run(
+                repo_info.setup,
+                shell=True,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            output = result.stdout + result.stderr
+            return result.returncode == 0, output.strip()
+        except subprocess.TimeoutExpired:
+            return False, "Setup command timed out (>300s)"
+
     def start(
         self,
         feature_name: str,
@@ -153,6 +182,7 @@ class FeatureManager:
         target_branch: str | None = None,
         description: str = "",
         materialize: bool = False,
+        run_setup: bool = True,
     ) -> tuple[FeatureInfo, list[str]]:
         """Start working on a feature: create if needed, enroll repos.
 
@@ -163,6 +193,7 @@ class FeatureManager:
             description: Description (only used on initial creation).
             materialize: If True, create worktrees for newly enrolled repos
                 immediately, auto-carrying dirty changes.
+            run_setup: If True, run configured setup commands after materialization.
 
         Returns:
             Tuple of (feature, list_of_newly_added_repo_names).
@@ -204,7 +235,9 @@ class FeatureManager:
                 name for name, _ in find_dirty_repos(self.ws, newly_added)
             }
             for repo_name in newly_added:
-                self.work(feature_name, repo_name, carry=repo_name in dirty_set)
+                wt_path = self.work(feature_name, repo_name, carry=repo_name in dirty_set)
+                if run_setup:
+                    self.run_setup(repo_name, wt_path)
 
         return feature, newly_added
 
@@ -253,7 +286,7 @@ class FeatureManager:
 
         return wt_path
 
-    def sync(self, feature_name: str) -> list[str]:
+    def sync(self, feature_name: str, run_setup: bool = True) -> list[str]:
         """Discover dirty repos and enroll + materialize them into the feature.
 
         Scans all workspace repos for uncommitted changes, enrolls any that
@@ -262,6 +295,7 @@ class FeatureManager:
 
         Args:
             feature_name: Name of the feature to sync into.
+            run_setup: If True, run configured setup commands after materialization.
 
         Returns:
             List of newly synced repo names.
@@ -276,8 +310,10 @@ class FeatureManager:
 
         synced: list[str] = []
         for repo_name, _ in new_dirty:
-            self.start(feature_name, [repo_name])
-            self.work(feature_name, repo_name, carry=True)
+            self.start(feature_name, [repo_name], run_setup=False)
+            wt_path = self.work(feature_name, repo_name, carry=True)
+            if run_setup:
+                self.run_setup(repo_name, wt_path)
             synced.append(repo_name)
 
         return synced

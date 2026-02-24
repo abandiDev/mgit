@@ -11,6 +11,19 @@ from mgit.core.workspace import Workspace
 from mgit.utils.errors import MgitError
 
 
+def _print_setup_status(ws, fm, repo_name, wt_path):
+    """Print setup command result for a repo if configured."""
+    repo_info = ws.get_repo(repo_name)
+    if not repo_info.setup:
+        return
+    click.echo(f"    Running setup: {repo_info.setup}")
+    ok, output = fm.run_setup(repo_name, wt_path)
+    if ok:
+        click.echo(f"    Setup complete.")
+    else:
+        click.secho(f"    Setup failed: {output}", fg="yellow", err=True)
+
+
 @click.group()
 def feature():
     """Manage cross-repo features."""
@@ -26,7 +39,9 @@ def feature():
 @click.option("--description", "-d", default="", help="Feature description (only on creation).")
 @click.option("--materialize", "-m", is_flag=True, default=False,
               help="Materialize worktrees immediately (auto-carries dirty changes).")
-def start(feature_name, repo_names, branch, description, materialize):
+@click.option("--no-setup", is_flag=True, default=False,
+              help="Skip running setup commands after materialization.")
+def start(feature_name, repo_names, branch, description, materialize, no_setup):
     """Start a feature: create/enroll repos.
 
     If no -r is given, enrolls all workspace repos.
@@ -43,6 +58,7 @@ def start(feature_name, repo_names, branch, description, materialize):
             target_branch=branch,
             description=description,
             materialize=materialize,
+            run_setup=not no_setup,
         )
     except MgitError as e:
         raise click.ClickException(str(e))
@@ -55,6 +71,8 @@ def start(feature_name, repo_names, branch, description, materialize):
         if materialize:
             wt_path = ws.worktree_path(feature_name, repo_name)
             click.echo(f"  + {repo_name}: {wt_path}/")
+            if not no_setup:
+                _print_setup_status(ws, fm, repo_name, wt_path)
         else:
             click.echo(f"  + {repo_name}")
     click.echo(f"Active feature: {feature_name}")
@@ -67,7 +85,9 @@ def start(feature_name, repo_names, branch, description, materialize):
 @click.argument("repo_name", required=False)
 @click.option("--carry/--no-carry", default=None,
               help="Carry uncommitted changes to the feature worktree.")
-def work(repo_name, carry):
+@click.option("--no-setup", is_flag=True, default=False,
+              help="Skip running setup commands after materialization.")
+def work(repo_name, carry, no_setup):
     """Materialize a worktree for a repo in the active feature.
 
     If REPO_NAME is omitted, auto-detects from current directory.
@@ -90,6 +110,9 @@ def work(repo_name, carry):
             raise click.ClickException(
                 "No repo specified and cwd is not inside a registered repo."
             )
+
+    # Check if already materialized (setup only runs for newly created worktrees)
+    already_materialized = fm.is_materialized(active, repo_name)
 
     # Detect dirty repo and resolve carry behavior
     do_carry = False
@@ -114,9 +137,15 @@ def work(repo_name, carry):
     suffix = " (changes carried)" if do_carry else ""
     click.echo(f"  {repo_name}: materialized -> {wt_path}/{suffix}")
 
+    # Run setup only for newly created worktrees
+    if not already_materialized and not no_setup:
+        _print_setup_status(ws, fm, repo_name, wt_path)
+
 
 @feature.command("sync")
-def sync():
+@click.option("--no-setup", is_flag=True, default=False,
+              help="Skip running setup commands after materialization.")
+def sync(no_setup):
     """Discover dirty repos and enroll them into the active feature.
 
     Scans all workspace repos for uncommitted changes, enrolls any that
@@ -133,7 +162,7 @@ def sync():
         )
 
     try:
-        synced = fm.sync(active)
+        synced = fm.sync(active, run_setup=not no_setup)
     except MgitError as e:
         raise click.ClickException(str(e))
 

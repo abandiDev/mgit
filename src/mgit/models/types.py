@@ -14,6 +14,7 @@ class RepoInfo:
     path: str
     url: str | None = None
     default_branch: str = "main"
+    setup: str | None = None
 
 
 @dataclass

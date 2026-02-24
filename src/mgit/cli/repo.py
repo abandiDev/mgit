@@ -58,6 +58,40 @@ def remove(name):
     click.echo(f"Removed repo '{name}' from workspace.")
 
 
+@repo.command("setup")
+@click.argument("name")
+@click.argument("command", required=False)
+@click.option("--clear", is_flag=True, help="Remove the setup command.")
+def setup(name, command, clear):
+    """Show, set, or clear a repo's setup command.
+
+    \b
+    Examples:
+      mgit repo setup frontend               # show current setup
+      mgit repo setup frontend "npm install"  # set setup command
+      mgit repo setup frontend --clear        # remove setup command
+    """
+    ws = Workspace.find()
+    try:
+        repo_info = ws.get_repo(name)
+    except MgitError as e:
+        raise click.ClickException(str(e))
+
+    if clear:
+        repo_info.setup = None
+        ws.save()
+        click.echo(f"Cleared setup command for '{name}'.")
+    elif command:
+        repo_info.setup = command
+        ws.save()
+        click.echo(f"Setup for '{name}': {command}")
+    else:
+        if repo_info.setup:
+            click.echo(f"Setup for '{name}': {repo_info.setup}")
+        else:
+            click.echo(f"No setup command configured for '{name}'.")
+
+
 @repo.command("list")
 def list_repos():
     """List all registered repos."""

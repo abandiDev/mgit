@@ -1,7 +1,8 @@
-"""CLI commands: mgit {status,pull,push,commit,exec}."""
+"""CLI commands: mgit {status,pull,push,commit,exec,setup}."""
 
 from __future__ import annotations
 
+import subprocess
 import sys
 
 import click
@@ -243,6 +244,60 @@ def exec_cmd(command, feature, repos, fail_fast):
                 repo=name, status=OpStatus.FAILED,
                 message=f"exit code {returncode}",
                 output=stderr or stdout,
+            )
+
+    result = run_bulk(repo_names, op, fail_fast=fail_fast)
+    print_bulk_results(result)
+    sys.exit(result.exit_code)
+
+
+@click.command("setup")
+@_common_options
+def setup_cmd(feature, repos, fail_fast):
+    """Run configured setup commands across repos.
+
+    Skips repos with no setup command or unmaterialized worktrees.
+    """
+    ws = Workspace.find()
+    repo_names = _resolve_repos(ws, feature, repos)
+    feature_info = _get_feature_info(ws, feature)
+
+    def op(name: str) -> RepoOpResult:
+        repo_info = ws.get_repo(name)
+        if not repo_info.setup:
+            return RepoOpResult(repo=name, status=OpStatus.SKIPPED,
+                                message="no setup command configured")
+
+        repo = _make_repo(ws, name, feature_info)
+        if repo is None:
+            return RepoOpResult(repo=name, status=OpStatus.SKIPPED,
+                                message="not materialized")
+
+        try:
+            proc = subprocess.run(
+                repo_info.setup,
+                shell=True,
+                cwd=repo.path,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            output = proc.stdout + proc.stderr
+            if proc.returncode == 0:
+                return RepoOpResult(
+                    repo=name, status=OpStatus.SUCCESS,
+                    message="setup complete", output=output.strip(),
+                )
+            else:
+                return RepoOpResult(
+                    repo=name, status=OpStatus.FAILED,
+                    message=f"exit code {proc.returncode}",
+                    output=output.strip(),
+                )
+        except subprocess.TimeoutExpired:
+            return RepoOpResult(
+                repo=name, status=OpStatus.FAILED,
+                message="setup timed out (>300s)",
             )
 
     result = run_bulk(repo_names, op, fail_fast=fail_fast)
