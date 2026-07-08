@@ -111,15 +111,22 @@ def remove(force):
 
 
 @click.command()
-def upgrade():
-    """Refresh generated files after an mgit version upgrade.
+@click.option("--fix", "apply_fix", is_flag=True, default=False,
+              help="Apply the safe automatic fixes for detected legacy artifacts.")
+def upgrade(apply_fix):
+    """Refresh generated files and check for artifacts left by older versions.
 
     Rewrites AGENT.md/AGENTS.md from the current template (backing up a
-    locally modified AGENT.md to AGENT.md.bak) and regenerates the ambient
-    brief files for every feature. Everything else upgrades lazily —
-    memory sidecars and lineage fields appear as features are used.
+    locally modified AGENT.md to AGENT.md.bak), regenerates the ambient
+    brief files for every feature, then runs health checks for legacy state:
+    bogus repo registrations, orphaned sandbox branches and pinning refs of
+    deleted features, mixed target branches, orphaned sidecars. Mechanical
+    fixes are applied with --fix; everything else is reported with the
+    manual remedy. Code-behavior fixes need none of this — they apply the
+    moment the binary is upgraded.
     """
     from mgit.core.brief import write_feature_brief
+    from mgit.core.doctor import run_checks
     from mgit.core.feature import FeatureManager, validate_feature_name
     from mgit.utils.errors import MgitError
 
@@ -144,3 +151,23 @@ def upgrade():
                 fg="yellow", err=True,
             )
     click.echo(f"Regenerated ambient briefs for {count} feature(s).")
+
+    findings = run_checks(ws)
+    if not findings:
+        click.echo("Health checks: no legacy issues found.")
+        return
+
+    click.echo(f"Health checks: {len(findings)} issue(s) found.")
+    fixable = [f for f in findings if f.fixable]
+    for f in findings:
+        click.secho(f"  warn  {f.message}", fg="yellow")
+        if f.fixable and apply_fix:
+            try:
+                f.fix()
+                click.echo(f"  fixed {f.fix_description}")
+            except Exception as e:
+                click.secho(f"  FAILED to fix ({e})", fg="red", err=True)
+        elif f.fixable:
+            click.echo(f"        [--fix would: {f.fix_description}]")
+    if fixable and not apply_fix:
+        click.echo(f"Run 'mgit upgrade --fix' to apply {len(fixable)} safe fix(es).")

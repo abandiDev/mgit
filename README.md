@@ -249,7 +249,7 @@ mgit push -f .
 | Command | Description |
 |---|---|
 | `mgit init [NAME]` | Initialize a workspace (scans for repos, generates AGENT.md/AGENTS.md) |
-| `mgit upgrade` | Refresh generated files after an mgit version upgrade (backs up a modified AGENT.md) |
+| `mgit upgrade [--fix]` | Refresh generated files + health-check for legacy artifacts; `--fix` applies the safe repairs |
 | `mgit remove [--force]` | Remove mgit metadata (.mgit/, AGENT.md, AGENTS.md), keeps repos |
 | `mgit context [--pretty] [-f <name\|.>]` | Workspace state as JSON; `-f` for a deep single-feature read |
 
@@ -326,7 +326,7 @@ All bulk commands support:
 - **Forks**: lineage (`parent`, pinned `fork_base` SHAs) lives in the feature file, never in branch names; forked children push to their own remote branch by default
 - **Checkpoints**: manifests at `.mgit/checkpoints/<feature>/`, snapshots pinned by `refs/mgit/checkpoint/...` (gc-immune, never pushed)
 - **One agent per feature**: the plan file is last-writer-wins (the journal preserves overwritten history); fork a variant instead of sharing a feature
-- **Upgrading from an older mgit**: everything is additive and lazy — old feature files load unchanged, memory appears on first use; run `mgit upgrade` once to refresh AGENT.md/AGENTS.md and the ambient briefs. Only behavior change: usage errors now exit `3` (was `1`), and carry prompts refuse non-TTY sessions instead of hanging
+- **Upgrading from an older mgit**: behavior fixes apply the moment the binary is upgraded — on-disk state is additive and lazy, old feature files load unchanged. Run `mgit upgrade` once per workspace: it refreshes AGENT.md/AGENTS.md and the ambient briefs, then health-checks for state older versions left behind (bogus repo registrations, orphaned sandbox branches/refs of deleted features, mixed target branches, orphaned sidecars); `mgit upgrade --fix` applies the mechanical repairs and reports the rest with manual remedies. Only behavior change: usage errors now exit `3` (was `1`), and carry prompts refuse non-TTY sessions instead of hanging
 
 ## Requirements
 
