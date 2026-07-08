@@ -2,19 +2,34 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
-from mgit.core import config, git
+from mgit.core import config, git, memory
 from mgit.core.repo import Repo
 from mgit.core.workspace import Workspace
 from mgit.models.types import FeatureInfo
 from mgit.utils.errors import (
     FeatureExistsError,
     FeatureNotFoundError,
+    MgitError,
     RepoNotFoundError,
 )
+
+# Feature names become branch refs (mgit/<name>), checkpoint refs, and
+# directory names — reject anything path- or ref-hostile.
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def validate_feature_name(name: str) -> None:
+    """Raise MgitError if a feature name can't be used in refs and paths."""
+    if not _NAME_RE.match(name) or ".." in name or name.endswith((".", ".lock")):
+        raise MgitError(
+            f"Invalid feature name '{name}': use letters, digits, '.', '_', '-' "
+            "(no '/', no leading '-' or '.', no '..')"
+        )
 
 
 def sandbox_branch(feature_name: str) -> str:
@@ -52,6 +67,11 @@ class FeatureManager:
             config.feature_to_dict(feature),
         )
 
+    def _regen_brief(self, feature: FeatureInfo) -> None:
+        """Regenerate the ambient CLAUDE.md/AGENTS.md brief (never raises)."""
+        from mgit.core.brief import write_feature_brief
+        write_feature_brief(self.ws, feature)
+
     def create(
         self,
         name: str,
@@ -66,6 +86,7 @@ class FeatureManager:
         Raises:
             FeatureExistsError: If feature already exists.
         """
+        validate_feature_name(name)
         path = self._feature_path(name)
         if path.exists():
             raise FeatureExistsError(f"Feature '{name}' already exists")
@@ -76,6 +97,10 @@ class FeatureManager:
             branches={},
         )
         config.write_toml(path, config.feature_to_dict(feature))
+        memory.append_event(
+            self.ws, name, f"Feature '{name}' created", event="created",
+            meta={"description": description} if description else None,
+        )
         return feature
 
     def delete(self, name: str) -> None:
@@ -96,10 +121,19 @@ class FeatureManager:
                     # If git worktree remove fails, clean up manually
                     shutil.rmtree(wt_path, ignore_errors=True)
 
-        # Clean up feature's worktree directory
+        # Clean up feature's worktree directory (includes generated briefs)
         feature_wt_dir = self.ws.worktrees_dir / name
         if feature_wt_dir.exists():
             shutil.rmtree(feature_wt_dir, ignore_errors=True)
+
+        # Clean up the memory sidecar directory
+        mem_dir = memory.memory_dir(self.ws, name)
+        if mem_dir.exists():
+            shutil.rmtree(mem_dir, ignore_errors=True)
+
+        # Clean up checkpoint manifests and pinning refs (incl. WIP refs)
+        from mgit.core.checkpoint import CheckpointManager
+        CheckpointManager(self.ws).delete_all_for_feature(name, list(feature.branches))
 
         # Delete feature file
         path.unlink()
@@ -144,7 +178,24 @@ class FeatureManager:
                 shutil.rmtree(wt_path, ignore_errors=True)
 
         del feature.branches[repo_name]
+        feature.fork_base.pop(repo_name, None)
+        feature.wip_from.pop(repo_name, None)
         self._save_feature(feature)
+
+        # Prune this repo's checkpoint/WIP pinning refs
+        try:
+            repo = Repo(self.ws.get_repo(repo_name), self.ws.root)
+            for ref in repo.list_refs(f"refs/mgit/checkpoint/{feature_name}/"):
+                repo.delete_ref(ref)
+            for ref in repo.list_refs(f"refs/mgit/wip/{feature_name}/"):
+                repo.delete_ref(ref)
+        except Exception:
+            pass
+        memory.append_event(
+            self.ws, feature_name, f"Removed repo '{repo_name}'",
+            event="repo_removed", repo=repo_name,
+        )
+        self._regen_brief(feature)
         return feature
 
     def run_setup(self, repo_name: str, cwd: Path) -> tuple[bool, str]:
@@ -230,6 +281,13 @@ class FeatureManager:
         # Save feature state
         self._save_feature(feature)
 
+        for repo_name in newly_added:
+            memory.append_event(
+                self.ws, feature_name, f"Enrolled repo '{repo_name}'",
+                event="repo_enrolled", repo=repo_name,
+                meta={"target_branch": target},
+            )
+
         # Set as active feature
         self.ws.set_active_feature(feature_name)
 
@@ -245,6 +303,7 @@ class FeatureManager:
                 if run_setup:
                     self.run_setup(repo_name, wt_path)
 
+        self._regen_brief(feature)
         return feature, newly_added
 
     def materialize(self, feature_name: str, repo_name: str, carry: bool = False) -> Path:
@@ -283,14 +342,41 @@ class FeatureManager:
         if carry:
             stashed = repo.stash_push(f"mgit-carry:{feature_name}")
 
+        # Forked features branch from the SHA pinned at fork time
+        start_point = feature.fork_base.get(repo_name)
+
         wt_path.parent.mkdir(parents=True, exist_ok=True)
-        repo.add_worktree(wt_path, sb)
+        repo.add_worktree(wt_path, sb, start_point=start_point)
 
         # Pop stash in the worktree if we stashed something
         if stashed:
             git.run_git("stash", "pop", cwd=wt_path)
 
+        # Re-materialize parent WIP carried by fork --carry-wip
+        wip_sha = feature.wip_from.get(repo_name)
+        if wip_sha:
+            self._apply_wip_snapshot(wt_path, wip_sha)
+
+        meta: dict = {"carried": bool(stashed)}
+        if start_point:
+            meta["from"] = start_point[:12]
+        memory.append_event(
+            self.ws, feature_name, f"Materialized worktree for '{repo_name}'",
+            event="materialized", repo=repo_name, meta=meta,
+        )
+
+        self._regen_brief(feature)
         return wt_path
+
+    def _apply_wip_snapshot(self, wt_path: Path, snapshot_sha: str) -> None:
+        """Re-materialize a WIP snapshot commit as dirty files in a fresh worktree.
+
+        The worktree branch starts at the snapshot's parent commit, so moving
+        the tree to the snapshot and the branch back is conflict-free.
+        """
+        head = git.run_git("rev-parse", "HEAD", cwd=wt_path).stdout.strip()
+        git.run_git("reset", "--hard", snapshot_sha, cwd=wt_path)
+        git.run_git("reset", head, cwd=wt_path)
 
     def sync(
         self,
@@ -330,6 +416,14 @@ class FeatureManager:
                 self.run_setup(repo_name, wt_path)
             synced.append(repo_name)
 
+        if synced:
+            memory.append_event(
+                self.ws, feature_name,
+                f"Synced {len(synced)} dirty repo(s): {', '.join(synced)}",
+                event="synced", meta={"repos": synced},
+            )
+            self._regen_brief(self.get(feature_name))
+
         return synced
 
     def is_materialized(self, feature_name: str, repo_name: str) -> bool:
@@ -350,7 +444,107 @@ class FeatureManager:
         # Set as active feature
         self.ws.set_active_feature(name)
 
+        memory.append_event(
+            self.ws, name, f"Switched to feature '{name}'", event="switched",
+        )
+        self._regen_brief(feature)
+
         return self.get_worktree_paths(name)
+
+    def fork(
+        self,
+        child_name: str,
+        parent_name: str,
+        *,
+        target_branch: str | None = None,
+        description: str = "",
+        materialize: bool = False,
+        run_setup: bool = True,
+        carry_wip: bool = False,
+    ) -> FeatureInfo:
+        """Fork a feature: new child with pinned per-repo base SHAs and inherited memory.
+
+        The child enrolls the same repos as the parent. Each repo's base is
+        pinned to the parent's sandbox-branch tip (or the local default branch
+        tip if the parent was never materialized), so lazy child worktrees
+        branch from the fork point even after the parent advances.
+
+        Args:
+            child_name: Name of the new feature.
+            parent_name: Feature to fork from.
+            target_branch: Child's remote target branch (default: child name).
+            description: Child description (defaults to parent's).
+            materialize: If True, materialize all child worktrees immediately.
+            run_setup: If True, run setup commands after materialization.
+            carry_wip: If True, snapshot the parent's dirty worktrees and
+                re-materialize the WIP in the child on materialize.
+
+        Returns:
+            The new child FeatureInfo.
+        """
+        parent = self.get(parent_name)
+        validate_feature_name(child_name)
+        if self._feature_path(child_name).exists():
+            raise FeatureExistsError(f"Feature '{child_name}' already exists")
+
+        target = target_branch or child_name
+        fork_base: dict[str, str] = {}
+        wip_from: dict[str, str] = {}
+        parent_sb = sandbox_branch(parent_name)
+
+        for repo_name in parent.branches:
+            repo_path = self.ws.repo_path(repo_name)
+            sha = None
+            for ref in (f"refs/heads/{parent_sb}",
+                        f"refs/heads/{self.ws.get_repo(repo_name).default_branch}",
+                        "HEAD"):
+                result = git.run_git("rev-parse", "--verify", "--quiet", ref,
+                                     cwd=repo_path, check=False)
+                if result.returncode == 0:
+                    sha = result.stdout.strip()
+                    break
+            if sha:
+                fork_base[repo_name] = sha
+
+            if carry_wip and self.is_materialized(parent_name, repo_name):
+                wt_path = self.ws.worktree_path(parent_name, repo_name)
+                repo = Repo.at_worktree(wt_path, self.ws.get_repo(repo_name))
+                if repo.is_dirty():
+                    snap = repo.snapshot_commit(f"mgit-wip: fork {child_name}")
+                    if snap and snap != fork_base.get(repo_name):
+                        wip_from[repo_name] = snap
+                        repo.update_ref(f"refs/mgit/wip/{child_name}/{repo_name}", snap)
+
+        child = self.create(child_name, description=description or parent.description)
+        child.parent = parent_name
+        child.branches = {repo_name: target for repo_name in parent.branches}
+        child.fork_base = fork_base
+        child.wip_from = wip_from
+        self._save_feature(child)
+
+        # Seed child memory from the parent's plan file
+        parent_state = memory.load_state(self.ws, parent_name)
+        memory.save_state(self.ws, child_name, parent_state)
+        memory.append_event(
+            self.ws, child_name, f"Forked from '{parent_name}'",
+            event="branched_from",
+            meta={"parent": parent_name, "fork_base": fork_base},
+        )
+        memory.append_event(
+            self.ws, parent_name, f"Forked into '{child_name}'",
+            event="forked", meta={"child": child_name},
+        )
+
+        self.ws.set_active_feature(child_name)
+
+        if materialize:
+            for repo_name in child.branches:
+                wt_path = self.materialize(child_name, repo_name)
+                if run_setup:
+                    self.run_setup(repo_name, wt_path)
+
+        self._regen_brief(child)
+        return child
 
     def get_worktree_paths(self, feature_name: str) -> dict[str, Path]:
         """Get worktree paths for each enrolled repo in a feature.

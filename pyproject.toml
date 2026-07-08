@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-mgit = "mgit.cli:main"
+mgit = "mgit.cli:cli"
 
 [project.optional-dependencies]
 dev = [

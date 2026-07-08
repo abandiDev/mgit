@@ -17,6 +17,7 @@ MGIT_DIR = ".mgit"
 CONFIG_FILE = "config.toml"
 FEATURES_DIR = "features"
 WORKTREES_DIR = "worktrees"
+CHECKPOINTS_DIR = "checkpoints"
 ACTIVE_FILE = "active"
 
 AGENT_MD_TEMPLATE = """\
@@ -26,7 +27,8 @@ This is an mgit multi-repo workspace. Use `mgit` commands to manage repos and fe
 
 ## Quick Reference
 
-Run `mgit context` for full workspace state as JSON.
+Run `mgit context` for full workspace state as JSON (`mgit context -f .` for a
+deep read of the active feature, including live per-repo git facts).
 
 ### Feature Workflow
 ```
@@ -38,10 +40,58 @@ mgit feature sync                                   # Discover dirty repos, enro
 mgit repo setup <repo> "npm install"                # Set per-repo setup command
 mgit setup -f .                                     # Run setup commands across feature repos
 mgit status -f .                                    # Status across feature repos
-mgit commit -m "message" -f .                       # Commit across materialized repos
-mgit push -f .                                      # Push feature branches to remote
+mgit commit -m "message" -f .                       # Commit across materialized repos (auto-journaled)
+mgit push -f .                                      # Push feature branches to remote (auto-journaled)
 mgit feature switch <name>                          # Set active feature
 ```
+
+### Working Memory (the agent ritual)
+Every feature keeps a persistent working memory: a plan file plus an
+append-only journal that mgit populates automatically at every lifecycle step
+(enroll, materialize, sync, commit, push, fork). A fresh session recovers
+everything with one call.
+
+```
+mgit feature brief                                  # FIRST CALL of a session: memory + journal + live git facts
+mgit feature plan --goal "..." --status "..."       # Keep the plan current
+mgit feature plan --add-next "..." --done 1         # Manage next steps
+mgit feature note "..." --type decision             # Record decisions as you make them
+mgit feature note "..." --type handoff              # Leave a handoff brief before ending a session
+mgit feature log -n 30                              # Read further back; --commits interleaves git commits
+```
+
+Before ending a session: update `plan --status` and check off finished steps.
+The memory survives context-window resets — the next session re-orients from it.
+A generated CLAUDE.md/AGENTS.md with this brief sits at `.mgit/worktrees/<feature>/`
+(an ancestor of every worktree), so harness sessions launched inside a worktree
+load it automatically. Never edit those files by hand.
+
+### Branching Features
+```
+mgit feature fork <child>                           # Fork the active feature: pinned base SHAs, inherited memory
+mgit feature fork <child> --carry-wip -m            # Also carry uncommitted work into the child
+mgit feature tree                                   # Ancestry view of all features
+```
+A fork enrolls the parent's repos, pins each repo's current sandbox tip as the
+child's branch point, and copies the parent's memory. The child pushes to its
+own remote branch by default (pass --branch to fold back into the parent's).
+
+### Checkpoints (cross-repo save-points)
+```
+mgit checkpoint save --label "before risky refactor"  # Pin HEAD + snapshot WIP in every repo (non-destructive)
+mgit checkpoint list                                   # What can I roll back to?
+mgit checkpoint restore <cp-id>                        # Restore code + memory; auto-saves a safety backup first
+```
+Checkpoint before risky multi-repo changes. Restore runs `git clean -fd` in
+worktrees — un-gitignored artifacts are removed (the automatic safety
+checkpoint preserves everything tracked or untracked-but-not-ignored).
+
+### Agent Contract
+- Exit codes: 0 success | 1 bulk partial failure | 2 domain error | 3 usage error | 4 internal error
+- `--json` on context/brief/plan/log/tree/checkpoint/bulk commands emits one
+  envelope: `{"mgit_schema": 1, "ok": bool, "command": str, "data": {...}, "error": null|{...}}`
+- Errors never print tracebacks; with `--json` they arrive as typed error objects
+- Prompts refuse non-TTY sessions with instructions (pass `--carry`/`--no-carry`)
 
 ### Conventions
 - `feature start` enrolls repos as metadata — pass `--materialize` to create worktrees immediately
@@ -54,6 +104,10 @@ mgit feature switch <name>                          # Set active feature
 - Remote branches: created at push time, named after the feature
 - Scope bulk commands with `-f <feature>` or `-f .` (active feature)
 - Multiple agents can work on different features concurrently (each in its own worktree)
+- One agent per feature: the plan file is last-writer-wins (the journal keeps
+  overwritten history); fork a variant instead of sharing one feature
+- Git is the source of truth for code state — mgit never stores dirty flags or
+  ahead counts, it computes them live
 """
 
 
@@ -66,6 +120,7 @@ class Workspace:
         self.config_path = self.mgit_dir / CONFIG_FILE
         self.features_dir = self.mgit_dir / FEATURES_DIR
         self.worktrees_dir = self.mgit_dir / WORKTREES_DIR
+        self.checkpoints_dir = self.mgit_dir / CHECKPOINTS_DIR
         self.name: str = root.name
         self.repos: dict[str, RepoInfo] = {}
 
@@ -118,9 +173,8 @@ class Workspace:
         ws.worktrees_dir.mkdir()
         ws.save()
 
-        # Generate AGENT.md in workspace root
-        agent_md_path = path / "AGENT.md"
-        agent_md_path.write_text(AGENT_MD_TEMPLATE)
+        # Generate AGENT.md (+ AGENTS.md, the cross-tool standard) in workspace root
+        ws.write_agent_md()
 
         found_repos: list[RepoInfo] = []
         if scan:
@@ -218,8 +272,25 @@ class Workspace:
         if active_path.exists():
             active_path.unlink()
 
+    def write_agent_md(self, backup: bool = False) -> list[str]:
+        """Write AGENT.md and AGENTS.md from the current template.
+
+        With backup=True, a locally modified AGENT.md is copied to
+        AGENT.md.bak before being overwritten (used by 'mgit upgrade').
+
+        Returns the names of the files written.
+        """
+        written = []
+        for fname in ("AGENT.md", "AGENTS.md"):
+            path = self.root / fname
+            if backup and path.exists() and path.read_text() != AGENT_MD_TEMPLATE:
+                (self.root / f"{fname}.bak").write_text(path.read_text())
+            path.write_text(AGENT_MD_TEMPLATE)
+            written.append(fname)
+        return written
+
     def remove(self) -> None:
-        """Remove the mgit workspace metadata (.mgit/ and AGENT.md).
+        """Remove the mgit workspace metadata (.mgit/, AGENT.md, AGENTS.md).
 
         Only removes mgit's own files — repos and other user files are untouched.
         """
@@ -228,9 +299,10 @@ class Workspace:
         if self.mgit_dir.exists():
             shutil.rmtree(self.mgit_dir)
 
-        agent_md = self.root / "AGENT.md"
-        if agent_md.exists():
-            agent_md.unlink()
+        for fname in ("AGENT.md", "AGENTS.md"):
+            agent_md = self.root / fname
+            if agent_md.exists():
+                agent_md.unlink()
 
     def detect_repo_from_cwd(self, cwd: Path | None = None) -> str | None:
         """Determine which registered repo contains cwd (deepest match).

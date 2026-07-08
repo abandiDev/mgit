@@ -13,6 +13,7 @@ def run_git(
     cwd: str | Path | None = None,
     check: bool = True,
     capture: bool = True,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a git command and return the result.
 
@@ -21,6 +22,8 @@ def run_git(
         cwd: Working directory for the command.
         check: If True, raise GitError on non-zero exit.
         capture: If True, capture stdout/stderr.
+        env: Extra environment variables, merged over os.environ
+            (e.g. GIT_INDEX_FILE for temp-index snapshots).
 
     Returns:
         CompletedProcess with stdout/stderr as strings.
@@ -28,13 +31,17 @@ def run_git(
     Raises:
         GitError: If check=True and the command fails.
     """
+    import os
+
     cmd = ["git", *args]
+    full_env = {**os.environ, **env} if env else None
     try:
         result = subprocess.run(
             cmd,
             cwd=cwd,
             capture_output=capture,
             text=True,
+            env=full_env,
         )
     except FileNotFoundError:
         raise GitError("git is not installed or not in PATH")

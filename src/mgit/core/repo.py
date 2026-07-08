@@ -122,10 +122,12 @@ class Repo:
 
     # --- Worktree operations ---
 
-    def add_worktree(self, path: Path, branch: str) -> None:
+    def add_worktree(self, path: Path, branch: str, start_point: str | None = None) -> None:
         """Create a worktree at path on the given branch.
 
-        If the branch doesn't exist, creates it with -b.
+        If the branch doesn't exist, creates it with -b — from start_point
+        when given (used by forked features to branch at the pinned SHA),
+        else from the current HEAD.
         """
         # Check if branch already exists
         result = git.run_git(
@@ -135,13 +137,90 @@ class Repo:
         if result.returncode == 0:
             # Branch exists — just add worktree on it
             git.run_git("worktree", "add", str(path), branch, cwd=self.path)
+        elif start_point:
+            git.run_git("worktree", "add", "-b", branch, str(path), start_point, cwd=self.path)
         else:
-            # Branch doesn't exist — create it
             git.run_git("worktree", "add", "-b", branch, str(path), cwd=self.path)
 
     def remove_worktree(self, path: Path) -> None:
         """Remove a worktree directory."""
         git.run_git("worktree", "remove", str(path), "--force", cwd=self.path)
+
+    # --- Ref plumbing (checkpoint/WIP anchoring) ---
+
+    def rev_parse(self, ref: str) -> str | None:
+        """Resolve a ref to a SHA, or None if it doesn't exist."""
+        result = git.run_git(
+            "rev-parse", "--verify", "--quiet", ref, cwd=self.path, check=False,
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    def update_ref(self, ref: str, sha: str) -> None:
+        """Create or move a ref (pins commits against gc)."""
+        git.run_git("update-ref", ref, sha, cwd=self.path)
+
+    def delete_ref(self, ref: str) -> None:
+        """Delete a ref if it exists."""
+        git.run_git("update-ref", "-d", ref, cwd=self.path, check=False)
+
+    def list_refs(self, prefix: str) -> dict[str, str]:
+        """List refs under a prefix as {refname: sha}."""
+        result = git.run_git(
+            "for-each-ref", "--format=%(refname) %(objectname)", prefix,
+            cwd=self.path, check=False,
+        )
+        refs: dict[str, str] = {}
+        for line in result.stdout.splitlines():
+            if " " in line:
+                name, _, sha = line.rpartition(" ")
+                refs[name] = sha
+        return refs
+
+    # --- Snapshot (non-destructive WIP capture) ---
+
+    def snapshot_commit(self, message: str) -> str:
+        """Capture the working tree (staged + unstaged + untracked, respecting
+        .gitignore) as a commit object parented on HEAD — via a temporary
+        index, so the real index and working tree are untouched.
+
+        Returns the snapshot SHA, or the HEAD SHA when the tree matches HEAD.
+        """
+        import tempfile
+
+        head = git.run_git("rev-parse", "HEAD", cwd=self.path).stdout.strip()
+        fd, tmp_index = tempfile.mkstemp(prefix="mgit-index-")
+        os.close(fd)
+        os.unlink(tmp_index)  # git creates the index file itself
+        env = {"GIT_INDEX_FILE": tmp_index}
+        try:
+            git.run_git("read-tree", "HEAD", cwd=self.path, env=env)
+            git.run_git("add", "-A", cwd=self.path, env=env)
+            tree = git.run_git("write-tree", cwd=self.path, env=env).stdout.strip()
+            head_tree = git.run_git(
+                "rev-parse", "HEAD^{tree}", cwd=self.path,
+            ).stdout.strip()
+            if tree == head_tree:
+                return head
+            return git.run_git(
+                "commit-tree", tree, "-p", head, "-m", message, cwd=self.path,
+            ).stdout.strip()
+        finally:
+            try:
+                os.unlink(tmp_index)
+            except OSError:
+                pass
+
+    def restore_to(self, head: str, snapshot: str) -> None:
+        """Restore the working tree to a checkpoint: committed state at `head`,
+        WIP from `snapshot` re-materialized as dirty files.
+
+        clean -fd removes files that didn't exist at the checkpoint (deletes
+        un-gitignored build artifacts — callers must checkpoint first).
+        """
+        git.run_git("clean", "-fd", cwd=self.path)
+        git.run_git("reset", "--hard", snapshot, cwd=self.path)
+        if snapshot != head:
+            git.run_git("reset", head, cwd=self.path)
 
     # --- Refspec push ---
 

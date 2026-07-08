@@ -7,7 +7,7 @@ from pathlib import Path
 
 import tomli_w
 
-from mgit.models.types import FeatureInfo, RepoInfo
+from mgit.models.types import CheckpointInfo, CheckpointRepoState, FeatureInfo, RepoInfo
 
 
 def read_toml(path: Path) -> dict:
@@ -57,7 +57,11 @@ def dict_to_repos(repos_dict: dict) -> dict[str, RepoInfo]:
 
 
 def feature_to_dict(feature: FeatureInfo) -> dict:
-    """Build the feature config dict for serialization."""
+    """Build the feature config dict for serialization.
+
+    Lineage fields (parent, fork_base, wip_from) are omitted when empty so
+    feature files created before they existed stay byte-identical on rewrite.
+    """
     data: dict = {
         "feature": {
             "name": feature.name,
@@ -65,6 +69,12 @@ def feature_to_dict(feature: FeatureInfo) -> dict:
         },
         "branches": dict(feature.branches),
     }
+    if feature.parent:
+        data["feature"]["parent"] = feature.parent
+    if feature.fork_base:
+        data["fork_base"] = dict(feature.fork_base)
+    if feature.wip_from:
+        data["wip_from"] = dict(feature.wip_from)
     return data
 
 
@@ -75,4 +85,48 @@ def dict_to_feature(data: dict) -> FeatureInfo:
         name=feat["name"],
         description=feat.get("description", ""),
         branches=dict(data.get("branches", {})),
+        parent=feat.get("parent"),
+        fork_base=dict(data.get("fork_base", {})),
+        wip_from=dict(data.get("wip_from", {})),
+    )
+
+
+def checkpoint_to_dict(cp: CheckpointInfo) -> dict:
+    """Build the checkpoint manifest dict for serialization."""
+    data: dict = {
+        "checkpoint": {
+            "id": cp.id,
+            "feature": cp.feature,
+            "label": cp.label,
+            "created_at": cp.created_at,
+        },
+        "repos": {},
+    }
+    for name, st in cp.repos.items():
+        data["repos"][name] = {
+            "head": st.head,
+            "snapshot": st.snapshot,
+            "branch": st.branch,
+            "dirty": st.dirty,
+        }
+    return data
+
+
+def dict_to_checkpoint(data: dict) -> CheckpointInfo:
+    """Parse a checkpoint manifest TOML dict into a CheckpointInfo object."""
+    cp = data["checkpoint"]
+    repos = {}
+    for name, entry in data.get("repos", {}).items():
+        repos[name] = CheckpointRepoState(
+            head=entry["head"],
+            snapshot=entry.get("snapshot", entry["head"]),
+            branch=entry.get("branch", ""),
+            dirty=entry.get("dirty", False),
+        )
+    return CheckpointInfo(
+        id=cp["id"],
+        feature=cp["feature"],
+        label=cp.get("label", ""),
+        created_at=cp.get("created_at", ""),
+        repos=repos,
     )

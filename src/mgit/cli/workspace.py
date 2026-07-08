@@ -1,4 +1,4 @@
-"""CLI commands: mgit init, mgit remove."""
+"""CLI commands: mgit init, mgit remove, mgit upgrade."""
 
 from pathlib import Path
 
@@ -115,3 +115,39 @@ def remove(force):
 
     ws.remove()
     click.echo(f"Removed mgit workspace from {ws.root}.")
+
+
+@click.command()
+def upgrade():
+    """Refresh generated files after an mgit version upgrade.
+
+    Rewrites AGENT.md/AGENTS.md from the current template (backing up a
+    locally modified AGENT.md to AGENT.md.bak) and regenerates the ambient
+    brief files for every feature. Everything else upgrades lazily —
+    memory sidecars and lineage fields appear as features are used.
+    """
+    from mgit.core.brief import write_feature_brief
+    from mgit.core.feature import FeatureManager, validate_feature_name
+    from mgit.utils.errors import MgitError
+
+    ws = Workspace.find()
+    fm = FeatureManager(ws)
+
+    written = ws.write_agent_md(backup=True)
+    click.echo(f"Regenerated {', '.join(written)} in {ws.root}.")
+    if (ws.root / "AGENT.md.bak").exists():
+        click.echo("  (previous AGENT.md backed up to AGENT.md.bak)")
+
+    count = 0
+    for feat in fm.list():
+        write_feature_brief(ws, feat)
+        count += 1
+        try:
+            validate_feature_name(feat.name)
+        except MgitError:
+            click.secho(
+                f"  Warning: feature '{feat.name}' has a name that can't be used "
+                "in checkpoint refs — consider recreating it under a valid name.",
+                fg="yellow", err=True,
+            )
+    click.echo(f"Regenerated ambient briefs for {count} feature(s).")
