@@ -683,3 +683,211 @@ def tree(as_json):
 
     for root in sorted(roots):
         render(root, 0)
+
+
+# --- Delivery ---
+
+
+def _pr_body(ws, feat, all_prs: dict[str, str], exclude_repo: str) -> str:
+    """Generate a PR/MR body from the feature's working memory.
+
+    Regenerated on every publish — the body is owned by mgit.
+    """
+    state = memory.load_state(ws, feat.name)
+    lines = [feat.description or f"Cross-repo feature '{feat.name}'.", ""]
+    if state.goal:
+        lines += [f"**Goal:** {state.goal}", ""]
+    if state.status:
+        lines += [f"**Status:** {state.status}", ""]
+    decisions, _ = memory.read_journal(ws, feat.name, limit=5, type_filter="decision")
+    if decisions:
+        lines.append("**Decisions:**")
+        lines += [f"- {d.get('text', '')}" for d in decisions]
+        lines.append("")
+    related = {r: u for r, u in all_prs.items() if r != exclude_repo}
+    if related:
+        lines.append(f"**Related ({feat.name}):**")
+        lines += [f"- {r}: {u}" for r, u in sorted(related.items())]
+        lines.append("")
+    lines.append(f"---\n_Published by `mgit feature publish` from feature `{feat.name}`;"
+                 " this body is regenerated on each publish._")
+    return "\n".join(lines)
+
+
+@feature.command("publish")
+@click.option("--feature", "-f", "feature_name", default=None,
+              help="Feature name (default: active).")
+@click.option("--title", default=None,
+              help="PR/MR title (default: feature description or name).")
+@click.option("--draft", is_flag=True, default=False, help="Create as draft.")
+@click.option("--json", "as_json", is_flag=True, help="Emit a JSON envelope.")
+def publish(feature_name, title, draft, as_json):
+    """Publish the feature: push each repo's branch and open linked PRs/MRs.
+
+    The forge (GitHub via gh, GitLab via glab) is auto-detected per repo from
+    its remote URL. Idempotent: re-running pushes new commits and updates the
+    existing PR instead of duplicating it. PR bodies are generated from the
+    feature's working memory and cross-link the sibling PRs.
+    """
+    from mgit.core.forge import get_forge
+    from mgit.core.repo import Repo
+    from mgit.models.types import BulkResult, OpStatus, RepoOpResult
+
+    if as_json:
+        output.set_json_mode()
+    ws = Workspace.find()
+    fm = FeatureManager(ws)
+    name = _feature_or_active(ws, feature_name)
+    feat = fm.get(name)
+    if not feat.branches:
+        raise MgitError(f"Feature '{name}' has no enrolled repos.")
+
+    result = BulkResult()
+    # repos touched this run that have a PR number we can edit for cross-links
+    touched: dict[str, dict] = {}
+    new_urls: dict[str, str] = {}
+
+    for repo_name, target in feat.branches.items():
+        repo_info = ws.get_repo(repo_name)
+
+        if not fm.is_materialized(name, repo_name):
+            result.results.append(RepoOpResult(
+                repo=repo_name, status=OpStatus.SKIPPED, message="not materialized"))
+            continue
+
+        facts = memory.repo_facts(ws, feat, repo_name)
+        if facts["ahead"] == 0:
+            result.results.append(RepoOpResult(
+                repo=repo_name, status=OpStatus.SKIPPED,
+                message=f"up to date with {facts['ahead_base']}"))
+            continue
+
+        wt_path = ws.worktree_path(name, repo_name)
+        wt_repo = Repo.at_worktree(wt_path, repo_info)
+        try:
+            wt_repo.push_to_target(target)
+        except MgitError as e:
+            result.results.append(RepoOpResult(
+                repo=repo_name, status=OpStatus.FAILED, message=str(e)))
+            continue
+
+        dirty_note = " (worktree dirty — uncommitted changes not published)" \
+            if facts["dirty"] else ""
+
+        forge = get_forge(repo_info.url)
+        if forge is None:
+            result.results.append(RepoOpResult(
+                repo=repo_name, status=OpStatus.SUCCESS,
+                message="pushed; no PR: can't detect forge from repo url"
+                        f"{dirty_note}"))
+            continue
+
+        origin_path = ws.repo_path(repo_name)
+        try:
+            existing = forge.find_pr(origin_path, target)
+            if existing:
+                touched[repo_name] = {**existing, "forge": forge}
+                new_urls[repo_name] = existing["url"]
+                msg = f"pushed; {forge.term} updated: {existing['url']}"
+            else:
+                pr_title = title or feat.description or f"Feature: {name}"
+                created = forge.create_pr(
+                    origin_path, target, repo_info.default_branch,
+                    pr_title, "(body pending)", draft=draft,
+                )
+                touched[repo_name] = {**created, "forge": forge}
+                if created.get("url"):
+                    new_urls[repo_name] = created["url"]
+                msg = f"pushed; {forge.term} created: {created.get('url', '?')}"
+            result.results.append(RepoOpResult(
+                repo=repo_name, status=OpStatus.SUCCESS,
+                message=msg + dirty_note))
+        except MgitError as e:
+            result.results.append(RepoOpResult(
+                repo=repo_name, status=OpStatus.FAILED,
+                message=f"pushed, but {forge.term} step failed: {e}"))
+
+    # Persist URLs, then (re)generate every touched PR body with cross-links
+    if new_urls:
+        feat = fm.record_prs(name, new_urls)
+    for repo_name, info in touched.items():
+        if info.get("number") is None:
+            continue
+        try:
+            info["forge"].update_body(
+                ws.repo_path(repo_name), info["number"],
+                _pr_body(ws, feat, feat.prs, exclude_repo=repo_name),
+            )
+        except MgitError:
+            pass  # body update is cosmetic; the push and PR already landed
+
+    for repo_name, url in new_urls.items():
+        memory.append_event(
+            ws, name, f"Published '{repo_name}' -> {url}",
+            event="published", repo=repo_name,
+            meta={"url": url, "target_branch": feat.branches.get(repo_name)},
+        )
+    if new_urls:
+        write_feature_brief(ws, feat)
+
+    if as_json:
+        output.emit("feature.publish", {
+            "feature": name, "prs": dict(feat.prs), **result.to_dict(),
+        })
+        sys.exit(result.exit_code)
+    from mgit.utils.display import print_bulk_results
+    print_bulk_results(result)
+    sys.exit(result.exit_code)
+
+
+@feature.command("checks")
+@click.option("--feature", "-f", "feature_name", default=None,
+              help="Feature name (default: active).")
+@click.option("--json", "as_json", is_flag=True, help="Emit a JSON envelope.")
+def checks(feature_name, as_json):
+    """CI, review, and merge status of the feature's PRs/MRs across repos."""
+    from mgit.core.forge import get_forge
+
+    if as_json:
+        output.set_json_mode()
+    ws = Workspace.find()
+    fm = FeatureManager(ws)
+    name = _feature_or_active(ws, feature_name)
+    feat = fm.get(name)
+
+    rows = []
+    for repo_name, target in feat.branches.items():
+        repo_info = ws.get_repo(repo_name)
+        forge = get_forge(repo_info.url)
+        if forge is None:
+            if repo_name in feat.prs:
+                rows.append({"repo": repo_name, "url": feat.prs[repo_name],
+                             "state": "unknown (forge not detected)"})
+            continue
+        try:
+            st = forge.status(ws.repo_path(repo_name), target)
+        except MgitError as e:
+            rows.append({"repo": repo_name, "state": "error", "error": str(e)})
+            continue
+        if st is None:
+            rows.append({"repo": repo_name, "state": "no-pr"})
+        else:
+            rows.append({"repo": repo_name, **st})
+
+    if as_json:
+        output.emit("feature.checks", {"feature": name, "prs": rows})
+        return
+
+    if not rows:
+        click.echo(f"No publishable repos with a detectable forge in '{name}'.")
+        return
+    for r in rows:
+        if "checks" in r:
+            c = r["checks"]
+            checks_s = f"{c['passed']} ok / {c['failed']} failed / {c['pending']} pending"
+            review = f"  review: {r['review']}" if r.get("review") else ""
+            click.echo(f"  {r['repo']:<20} {r['state']:<8} checks: {checks_s}{review}")
+            click.echo(f"    {r.get('url', '')}")
+        else:
+            detail = r.get("error") or r.get("url") or ""
+            click.echo(f"  {r['repo']:<20} {r['state']}  {detail}")

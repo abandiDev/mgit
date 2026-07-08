@@ -181,6 +181,25 @@ anchored by `refs/mgit/checkpoint/...` so gc can't eat them and push never
 publishes them. Restore brings back committed state, re-materializes the WIP as
 dirty files, and rewinds the memory file to match.
 
+### 10. Publish: linked PRs across repos
+
+```bash
+mgit feature publish
+#   [+] shared-lib: pushed; PR created: https://github.com/org/shared-lib/pull/12
+#   [+] api-gateway: pushed; MR created: https://gitlab.com/org/api-gateway/-/merge_requests/7
+
+mgit feature checks
+#   shared-lib    open  checks: 3 ok / 0 failed / 1 pending  review: APPROVED
+#   api-gateway   open  checks: 1 ok / 0 failed / 0 pending
+```
+
+`publish` pushes each repo's branch and opens a PR (GitHub via `gh`) or MR
+(GitLab via `glab`) — the forge is auto-detected per repo from its remote URL,
+so mixed workspaces work. PR bodies are generated from the feature's working
+memory (goal, status, recent decisions) and cross-link the sibling PRs.
+Re-running is idempotent: new commits are pushed and existing PRs updated, never
+duplicated. Authentication belongs to `gh`/`glab` — mgit never touches tokens.
+
 ## Agent workflow
 
 mgit is built agent-first. Three layers, from ambient to programmatic:
@@ -256,6 +275,8 @@ mgit push -f .
 | `mgit feature deactivate` | Clear active feature |
 | `mgit feature show <name>` | Show feature details (enrolled repos, worktree status) |
 | `mgit feature list` | List all features (`*` marks active) |
+| `mgit feature publish [--title T] [--draft] [--json]` | Push + open linked PRs/MRs (gh/glab auto-detected per repo) |
+| `mgit feature checks [--json]` | CI/review/merge status of the feature's PRs across repos |
 | `mgit feature delete <name>` | Delete a feature: worktrees, memory, checkpoints, refs |
 | `mgit feature remove-repo <feature> <repo>` | Remove a repo from a feature |
 

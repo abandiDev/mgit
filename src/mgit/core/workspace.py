@@ -86,6 +86,14 @@ Checkpoint before risky multi-repo changes. Restore runs `git clean -fd` in
 worktrees — un-gitignored artifacts are removed (the automatic safety
 checkpoint preserves everything tracked or untracked-but-not-ignored).
 
+### Delivery
+```
+mgit feature publish                                # Push + open linked PRs/MRs (gh/glab auto-detected per repo)
+mgit feature checks                                 # CI/review/merge status of the feature's PRs in one call
+```
+PR bodies are generated from the working memory and cross-link sibling PRs;
+re-publishing is idempotent (pushes new commits, updates existing PRs).
+
 ### Agent Contract
 - Exit codes: 0 success | 1 bulk partial failure | 2 domain error | 3 usage error | 4 internal error
 - `--json` on context/brief/plan/log/tree/checkpoint/bulk commands emits one

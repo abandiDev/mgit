@@ -27,6 +27,7 @@ class FeatureInfo:
     parent: str | None = None  # feature this was forked from
     fork_base: dict[str, str] = field(default_factory=dict)  # repo_name -> SHA pinned at fork
     wip_from: dict[str, str] = field(default_factory=dict)  # repo_name -> WIP snapshot SHA
+    prs: dict[str, str] = field(default_factory=dict)  # repo_name -> published PR/MR URL
 
 
 @dataclass

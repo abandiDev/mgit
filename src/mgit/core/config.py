@@ -75,6 +75,8 @@ def feature_to_dict(feature: FeatureInfo) -> dict:
         data["fork_base"] = dict(feature.fork_base)
     if feature.wip_from:
         data["wip_from"] = dict(feature.wip_from)
+    if feature.prs:
+        data["prs"] = dict(feature.prs)
     return data
 
 
@@ -88,6 +90,7 @@ def dict_to_feature(data: dict) -> FeatureInfo:
         parent=feat.get("parent"),
         fork_base=dict(data.get("fork_base", {})),
         wip_from=dict(data.get("wip_from", {})),
+        prs=dict(data.get("prs", {})),
     )
 
 

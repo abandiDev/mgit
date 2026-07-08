@@ -2,6 +2,8 @@
 
 *Design exploration, 2026-07-08. Produced by a multi-agent workflow: 3 codebase readers → 6 dimension designers (working memory, feature branching, agent interface, multi-agent handoff, cross-repo timeline, harness integration) → 3-lens judge panel (agent ergonomics, simplicity, product coherence) → synthesis.*
 
+**Update, 2026-07-08 (later):** the cut-list deferral of `feature publish`/`feature checks` was revisited once the owner confirmed mgit serves his professional workflow — work features end in PRs, and end-to-end testing requires delivery. Shipped as `core/forge.py` (GitHub via gh / GitLab via glab, auto-detected per repo from the remote URL), `feature publish` (idempotent push + linked PRs, bodies generated from working memory), and `feature checks` (CI/review/merge status). PR URLs persist in a `[prs]` table in the feature TOML. Still deferred: `feature land` (merge automation) — the riskiest piece, waiting until publish/checks have proven themselves in daily use. Caveat by design: PR bodies are owned by mgit and regenerated on each publish.
+
 **Status: implemented (all three phases), 2026-07-08.** New modules: `core/memory.py`, `core/brief.py`, `core/checkpoint.py`, `cli/checkpoint.py`, `utils/output.py`. New commands: `feature brief/note/plan/log/fork/tree`, `checkpoint save/restore/list/show/delete`, `upgrade`. One deviation from the plan: the console-script entry point in pyproject.toml pointed at `main` instead of the `cli()` wrapper, so the exit-code contract required fixing that (the error handler had been dead code). 180 tests pass (117 pre-existing + 63 new).
 
 ## Vision

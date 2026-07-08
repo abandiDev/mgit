@@ -180,6 +180,7 @@ class FeatureManager:
         del feature.branches[repo_name]
         feature.fork_base.pop(repo_name, None)
         feature.wip_from.pop(repo_name, None)
+        feature.prs.pop(repo_name, None)
         self._save_feature(feature)
 
         # Prune this repo's checkpoint/WIP pinning refs
@@ -425,6 +426,13 @@ class FeatureManager:
             self._regen_brief(self.get(feature_name))
 
         return synced
+
+    def record_prs(self, feature_name: str, prs: dict[str, str]) -> FeatureInfo:
+        """Persist published PR/MR URLs (repo -> url) into the feature file."""
+        feature = self.get(feature_name)
+        feature.prs.update(prs)
+        self._save_feature(feature)
+        return feature
 
     def is_materialized(self, feature_name: str, repo_name: str) -> bool:
         """Check if a repo's worktree has been materialized for a feature."""

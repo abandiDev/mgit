@@ -202,6 +202,7 @@ def repo_facts(ws: Workspace, feature: FeatureInfo, repo_name: str) -> dict:
         "ahead": None,
         "ahead_base": None,
         "last_commit": None,
+        "pr": feature.prs.get(repo_name),
     }
     sb = sandbox_branch(feature.name)
     try:
@@ -292,6 +293,8 @@ def render_brief(brief: dict) -> str:
             bits.append(f"{facts['ahead']} ahead of {facts['ahead_base']}")
         if facts["last_commit"]:
             bits.append(f"last: {facts['last_commit']}")
+        if facts.get("pr"):
+            bits.append(f"pr: {facts['pr']}")
         lines.append(f"- {facts['repo']} -> {facts['target_branch']} ({', '.join(bits)})")
     if brief["journal"]:
         lines.append("")
