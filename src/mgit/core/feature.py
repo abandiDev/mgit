@@ -236,6 +236,7 @@ class FeatureManager:
         materialize: bool = False,
         run_setup: bool = True,
         carry_repos: set[str] | None = None,
+        activate: bool = True,
     ) -> tuple[FeatureInfo, list[str]]:
         """Start working on a feature: create if needed, enroll repos.
 
@@ -289,8 +290,10 @@ class FeatureManager:
                 meta={"target_branch": target},
             )
 
-        # Set as active feature
-        self.ws.set_active_feature(feature_name)
+        # Set as active feature (skippable so parallel sessions can start
+        # features without flipping the shared pointer under each other)
+        if activate:
+            self.ws.set_active_feature(feature_name)
 
         # Materialize worktrees for newly enrolled repos if requested
         if materialize and newly_added:
@@ -469,6 +472,7 @@ class FeatureManager:
         materialize: bool = False,
         run_setup: bool = True,
         carry_wip: bool = False,
+        activate: bool = True,
     ) -> FeatureInfo:
         """Fork a feature: new child with pinned per-repo base SHAs and inherited memory.
 
@@ -543,7 +547,8 @@ class FeatureManager:
             event="forked", meta={"child": child_name},
         )
 
-        self.ws.set_active_feature(child_name)
+        if activate:
+            self.ws.set_active_feature(child_name)
 
         if materialize:
             for repo_name in child.branches:

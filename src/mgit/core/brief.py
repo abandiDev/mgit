@@ -28,22 +28,29 @@ _HEADER = (
 _RITUAL = """
 ## Working here (mgit ritual for agents)
 
-This directory holds one git worktree per repo for this feature. This file is
-a snapshot from the last mgit operation — run `mgit feature brief` for live state.
+This directory holds one git worktree per repo for feature '{name}'. This file
+is a snapshot from the last mgit operation — run `mgit feature brief` for live
+state.
 
 - Re-orient: `mgit feature brief` (memory + journal + live git facts, one call)
 - Record decisions as you make them: `mgit feature note "..." --type decision`
 - Keep the plan current: `mgit feature plan --status "..." --done N --add-next "..."`
 - Commit across repos (auto-journaled): `mgit commit -m "..." -f .`
-- Push feature branches: `mgit push -f .`
+- Push feature branches / open PRs: `mgit push -f .` / `mgit feature publish`
 - Full workspace state as JSON: `mgit context`
+
+Commands run from inside this directory resolve to feature '{name}'
+automatically, even if another session switches the workspace's active
+feature. From outside it, pin the feature with `-f {name}` or
+`export MGIT_FEATURE={name}` — never rely on the active pointer when
+parallel sessions may be running.
 """
 
 
 def render_feature_brief(ws: Workspace, feature: FeatureInfo) -> str:
     """Render the ambient brief: header + working-memory brief + agent ritual."""
     data = memory.build_brief(ws, feature)
-    return _HEADER + memory.render_brief(data) + _RITUAL
+    return _HEADER + memory.render_brief(data) + _RITUAL.format(name=feature.name)
 
 
 def write_feature_brief(ws: Workspace, feature: FeatureInfo) -> None:

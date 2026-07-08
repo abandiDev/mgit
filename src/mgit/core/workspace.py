@@ -112,8 +112,21 @@ re-publishing is idempotent (pushes new commits, updates existing PRs).
 - Remote branches: created at push time, named after the feature
 - Scope bulk commands with `-f <feature>` or `-f .` (active feature)
 - Multiple agents can work on different features concurrently (each in its own worktree)
-- One agent per feature: the plan file is last-writer-wins (the journal keeps
-  overwritten history); fork a variant instead of sharing one feature
+- One agent per feature: the plan file is last-writer-wins (plan_updated
+  journal events carry the full state, so overwrites are recoverable); fork a
+  variant instead of sharing one feature
+
+### Parallel Sessions (IMPORTANT)
+Feature resolution priority: `-f <name>` > `$MGIT_FEATURE` > the worktree you
+are inside > the workspace-global active pointer. The active pointer is a
+single-session convenience — another session's `feature start/switch/fork`
+moves it. To stay isolated:
+- Run each session from inside its feature's worktree directory
+  (`.mgit/worktrees/<feature>/...`) — commands resolve to that feature
+  automatically; or
+- `export MGIT_FEATURE=<name>` once per session; or pass `-f <name>` explicitly
+- Use `--no-activate` on `feature start`/`fork` in sessions that must not
+  move the shared pointer
 - Git is the source of truth for code state — mgit never stores dirty flags or
   ahead counts, it computes them live
 """
@@ -311,6 +324,42 @@ class Workspace:
             agent_md = self.root / fname
             if agent_md.exists():
                 agent_md.unlink()
+
+    def detect_feature_from_cwd(self, cwd: Path | None = None) -> str | None:
+        """Feature whose worktree tree contains cwd, or None.
+
+        Being inside .mgit/worktrees/<feature>/... unambiguously identifies
+        the feature this session is working on.
+        """
+        target = (cwd or Path.cwd()).resolve()
+        try:
+            rel = target.relative_to(self.worktrees_dir.resolve())
+        except ValueError:
+            return None
+        if not rel.parts:
+            return None
+        name = rel.parts[0]
+        if (self.features_dir / f"{name}.toml").exists():
+            return name
+        return None
+
+    def resolve_feature(self, explicit: str | None = None) -> str | None:
+        """Resolve which feature a command applies to.
+
+        Priority: explicit -f value > $MGIT_FEATURE > the worktree cwd is
+        inside > the workspace-global active pointer. The active pointer is a
+        single-session convenience: parallel sessions on different features
+        stay isolated as long as each runs inside its feature's worktree or
+        pins MGIT_FEATURE.
+        """
+        import os
+
+        if explicit and explicit != ".":
+            return explicit
+        env = os.environ.get("MGIT_FEATURE")
+        if env:
+            return env
+        return self.detect_feature_from_cwd() or self.get_active_feature()
 
     def detect_repo_from_cwd(self, cwd: Path | None = None) -> str | None:
         """Determine which registered repo contains cwd (deepest match).

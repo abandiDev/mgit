@@ -73,10 +73,10 @@ def context(pretty, feature_scope):
     current_repo = ws.detect_repo_from_cwd()
 
     if feature_scope:
-        name = active_name if feature_scope == "." else feature_scope
+        name = ws.resolve_feature(feature_scope)
         if not name:
             from mgit.utils.errors import MgitError
-            raise MgitError("No active feature. Pass -f <name>.")
+            raise MgitError("No feature in scope. Pass -f <name>.")
         out = {
             "mgit_schema": output_mod.MGIT_SCHEMA,
             "workspace": {"name": ws.name, "root": str(ws.root)},

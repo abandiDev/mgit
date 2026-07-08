@@ -12,10 +12,13 @@ from mgit.utils.errors import MgitError
 def _feature_or_active(ws, feature_name):
     if feature_name and feature_name != ".":
         return feature_name
-    active = ws.get_active_feature()
-    if not active:
-        raise MgitError("No active feature. Pass -f <name> or run 'mgit feature start'.")
-    return active
+    resolved = ws.resolve_feature(feature_name)
+    if not resolved:
+        raise MgitError(
+            "No feature in scope. Pass -f <name>, export MGIT_FEATURE, "
+            "run inside a feature worktree, or use 'mgit feature start'."
+        )
+    return resolved
 
 
 def _cp_to_dict(cp) -> dict:

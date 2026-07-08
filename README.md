@@ -318,7 +318,8 @@ All bulk commands support:
 - **Worktrees**: each feature gets isolated directories at `.mgit/worktrees/<feature>/<repo>/`
 - **Sandbox branches**: `mgit/<feature-name>` — created locally in worktrees, never pushed as-is
 - **Remote branches**: created at push time, named after the feature's target branch
-- **Active feature**: set automatically by `start`/`switch`/`fork`, use `-f .` as shorthand in bulk commands
+- **Active feature**: set automatically by `start`/`switch`/`fork` (skip with `--no-activate`), use `-f .` as shorthand in bulk commands
+- **Feature resolution** (parallel-session safe): `-f <name>` > `$MGIT_FEATURE` > the worktree cwd is inside > the active pointer — sessions running inside their feature's worktree never cross-talk through the shared active file
 - **Lazy by default**: `feature start` enrolls repos as metadata only; use `--materialize` or `feature materialize` to create worktrees
 - **Carry**: `--carry` moves uncommitted changes from the original repo into the feature worktree
 - **Memory sidecar**: plan + journal live at `.mgit/features/<feature>/` (plain TOML/JSONL); the journal is append-only

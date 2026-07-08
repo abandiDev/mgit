@@ -186,6 +186,25 @@ check "parent WIP carried into child" grep -q wip "$CHILD_WT/experiment.py"
 "$MGIT" feature tree > "$SANDBOX/tree.txt"
 check "tree shows ancestry" grep -q "pay-flow-v2" "$SANDBOX/tree.txt"
 
+# ---------- parallel-session isolation ----------
+section "parallel sessions: cwd/env pin the feature"
+# Active is pay-flow-v2 (fork switched it). A session inside the PARENT's
+# worktree must write to the parent's memory, not the active feature's.
+( cd "$WT" && "$MGIT" feature note "parent-session note" >/dev/null )
+check "note from parent worktree lands in parent journal" \
+    grep -q "parent-session note" .mgit/features/pay-flow/journal.jsonl
+check "child journal untouched" \
+    bash -c '! grep -q "parent-session note" .mgit/features/pay-flow-v2/journal.jsonl'
+check "MGIT_FEATURE pins from workspace root" \
+    env MGIT_FEATURE=pay-flow-v2 "$MGIT" feature note "env-pinned note"
+check "env-pinned note in child journal" \
+    grep -q "env-pinned note" .mgit/features/pay-flow-v2/journal.jsonl
+"$MGIT" feature start side-quest -r svc-api --no-activate >/dev/null
+[ "$(cat .mgit/active)" = "pay-flow-v2" ] \
+    && ok "--no-activate leaves active pointer alone" \
+    || fail "--no-activate leaves active pointer alone"
+"$MGIT" feature delete side-quest >/dev/null
+
 # ---------- publish + checks ----------
 section "publish + checks (mixed forges)"
 check "switch back to parent" "$MGIT" feature switch pay-flow

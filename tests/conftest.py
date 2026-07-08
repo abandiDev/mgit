@@ -54,3 +54,9 @@ def initialized_workspace(workspace_with_repos):
 
     ws, found = Workspace.init(workspace_with_repos, scan=True, auto_add=True)
     return ws
+
+
+@pytest.fixture(autouse=True)
+def clean_mgit_env(monkeypatch):
+    """Keep the suite hermetic from the developer's shell environment."""
+    monkeypatch.delenv("MGIT_FEATURE", raising=False)

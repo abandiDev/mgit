@@ -30,15 +30,23 @@ def _print_setup_status(ws, fm, repo_name, wt_path):
 
 
 def _require_active(ws) -> str:
-    """Return the active feature name or raise a domain error."""
-    active = ws.get_active_feature()
-    if not active:
-        raise MgitError("No active feature. Use 'mgit feature start' first.")
-    return active
+    """Resolve the feature this invocation applies to, or raise.
+
+    Priority: $MGIT_FEATURE > worktree cwd is inside > active pointer —
+    so parallel sessions on different features don't cross-talk through
+    the workspace-global active file.
+    """
+    name = ws.resolve_feature()
+    if not name:
+        raise MgitError(
+            "No feature in scope. Pass -f <name>, export MGIT_FEATURE, "
+            "run inside a feature worktree, or use 'mgit feature start'."
+        )
+    return name
 
 
 def _feature_or_active(ws, feature_name: str | None) -> str:
-    """Resolve -f value ('.'/None mean the active feature)."""
+    """Resolve -f value ('.'/None fall through to session resolution)."""
     if feature_name and feature_name != ".":
         return feature_name
     return _require_active(ws)
@@ -88,7 +96,9 @@ def feature():
               help="Carry uncommitted changes to worktrees (default: prompt per repo).")
 @click.option("--no-setup", is_flag=True, default=False,
               help="Skip running setup commands after materialization.")
-def start(feature_name, repo_names, branch, description, materialize, carry, no_setup):
+@click.option("--no-activate", is_flag=True, default=False,
+              help="Don't switch the workspace-global active feature (parallel sessions).")
+def start(feature_name, repo_names, branch, description, materialize, carry, no_setup, no_activate):
     """Start a feature: create/enroll repos.
 
     If no -r is given, enrolls all workspace repos.
@@ -122,6 +132,7 @@ def start(feature_name, repo_names, branch, description, materialize, carry, no_
         materialize=materialize,
         run_setup=not no_setup,
         carry_repos=carry_repos,
+        activate=not no_activate,
     )
 
     total = len(feat.branches)
@@ -138,7 +149,8 @@ def start(feature_name, repo_names, branch, description, materialize, carry, no_
                 _print_setup_status(ws, fm, repo_name, wt_path)
         else:
             click.echo(f"  + {repo_name}")
-    click.echo(f"Active feature: {feature_name}")
+    if not no_activate:
+        click.echo(f"Active feature: {feature_name}")
     if not materialize:
         click.echo()
         click.echo("Use 'mgit feature materialize <repo>' to materialize a worktree.")
@@ -470,9 +482,17 @@ def plan(goal, status, next_steps, add_next, done_n, asks, resolve_n,
 
     if changed:
         memory.save_state(ws, name, state)
+        # Carry the full new state so last-writer-wins overwrites of
+        # memory.toml are always recoverable from the append-only journal
         memory.append_event(
             ws, name, f"Plan updated ({', '.join(sorted(set(changed)))})",
             event="plan_updated", actor="agent",
+            meta={
+                "goal": state.goal,
+                "status": state.status,
+                "next_steps": list(state.next_steps),
+                "open_questions": list(state.open_questions),
+            },
         )
         write_feature_brief(ws, feat)
 
@@ -603,7 +623,9 @@ def _feature_commits(ws, feat) -> list:
               help="Snapshot the parent's uncommitted work and re-apply it in the child.")
 @click.option("--no-setup", is_flag=True, default=False,
               help="Skip running setup commands after materialization.")
-def fork(child_name, parent_name, branch, description, materialize, carry_wip, no_setup):
+@click.option("--no-activate", is_flag=True, default=False,
+              help="Don't switch the workspace-global active feature (parallel sessions).")
+def fork(child_name, parent_name, branch, description, materialize, carry_wip, no_setup, no_activate):
     """Fork a feature: new variant with pinned base SHAs and inherited memory."""
     ws = Workspace.find()
     fm = FeatureManager(ws)
@@ -616,6 +638,7 @@ def fork(child_name, parent_name, branch, description, materialize, carry_wip, n
         materialize=materialize,
         run_setup=not no_setup,
         carry_wip=carry_wip,
+        activate=not no_activate,
     )
     write_feature_brief(ws, child)
 
@@ -627,7 +650,8 @@ def fork(child_name, parent_name, branch, description, materialize, carry_wip, n
         if materialize:
             mat = f" -> {ws.worktree_path(child_name, repo_name)}/"
         click.echo(f"  + {repo_name} @ {base}{wip}{mat}")
-    click.echo(f"Active feature: {child_name}")
+    if not no_activate:
+        click.echo(f"Active feature: {child_name}")
 
 
 @feature.command("tree")

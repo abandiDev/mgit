@@ -18,14 +18,15 @@ from mgit.utils.parallel import run_bulk
 
 
 def _resolve_feature_name(ws: Workspace, feature_name: str) -> str:
-    """Resolve '.' to the active feature name."""
+    """Resolve '.' to this session's feature ($MGIT_FEATURE > cwd worktree > active)."""
     if feature_name == ".":
-        active = ws.get_active_feature()
-        if not active:
-            raise click.ClickException(
-                "No active feature. Use 'mgit feature start' or 'mgit feature activate' first."
+        resolved = ws.resolve_feature(".")
+        if not resolved:
+            raise MgitError(
+                "No feature in scope. Pass -f <name>, export MGIT_FEATURE, "
+                "run inside a feature worktree, or use 'mgit feature start'."
             )
-        return active
+        return resolved
     return feature_name
 
 
