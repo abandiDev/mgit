@@ -129,6 +129,10 @@ class Repo:
         when given (used by forked features to branch at the pinned SHA),
         else from the current HEAD.
         """
+        # A worktree dir deleted with rm -rf (not 'git worktree remove')
+        # stays registered and would make 'worktree add' fail forever
+        git.run_git("worktree", "prune", cwd=self.path, check=False)
+
         # Check if branch already exists
         result = git.run_git(
             "rev-parse", "--verify", branch,
@@ -210,13 +214,23 @@ class Repo:
             except OSError:
                 pass
 
-    def restore_to(self, head: str, snapshot: str) -> None:
+    def restore_to(self, head: str, snapshot: str, branch: str | None = None) -> None:
         """Restore the working tree to a checkpoint: committed state at `head`,
         WIP from `snapshot` re-materialized as dirty files.
 
-        clean -fd removes files that didn't exist at the checkpoint (deletes
-        un-gitignored build artifacts — callers must checkpoint first).
+        When `branch` is given, the worktree is forced back onto that branch
+        first — otherwise the resets would move whatever branch the user
+        happens to have checked out (e.g. an experiment branch), silently
+        rewriting it. clean -fd removes files that didn't exist at the
+        checkpoint (deletes un-gitignored artifacts — callers must
+        checkpoint first).
         """
+        if branch:
+            current = git.run_git(
+                "rev-parse", "--abbrev-ref", "HEAD", cwd=self.path, check=False,
+            ).stdout.strip()
+            if current != branch:
+                git.run_git("checkout", "-f", "-B", branch, head, cwd=self.path)
         git.run_git("clean", "-fd", cwd=self.path)
         git.run_git("reset", "--hard", snapshot, cwd=self.path)
         if snapshot != head:

@@ -25,10 +25,11 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 def validate_feature_name(name: str) -> None:
     """Raise MgitError if a feature name can't be used in refs and paths."""
-    if not _NAME_RE.match(name) or ".." in name or name.endswith((".", ".lock")):
+    if (not _NAME_RE.match(name) or ".." in name
+            or name.endswith((".", ".lock", ".toml"))):
         raise MgitError(
             f"Invalid feature name '{name}': use letters, digits, '.', '_', '-' "
-            "(no '/', no leading '-' or '.', no '..')"
+            "(no '/', no leading '-' or '.', no '..', no '.toml' suffix)"
         )
 
 
@@ -121,6 +122,19 @@ class FeatureManager:
                     # If git worktree remove fails, clean up manually
                     shutil.rmtree(wt_path, ignore_errors=True)
 
+        # Delete the sandbox branch in each repo — a later feature with the
+        # same name must start fresh, not resurrect this feature's commits
+        sb = sandbox_branch(name)
+        for repo_name in feature.branches:
+            if repo_name not in self.ws.repos:
+                continue
+            try:
+                repo = Repo(self.ws.get_repo(repo_name), self.ws.root)
+                git.run_git("worktree", "prune", cwd=repo.path, check=False)
+                git.run_git("branch", "-D", sb, cwd=repo.path, check=False)
+            except Exception:
+                continue
+
         # Clean up feature's worktree directory (includes generated briefs)
         feature_wt_dir = self.ws.worktrees_dir / name
         if feature_wt_dir.exists():
@@ -156,6 +170,8 @@ class FeatureManager:
         if not self.ws.features_dir.exists():
             return features
         for path in sorted(self.ws.features_dir.glob("*.toml")):
+            if not path.is_file():
+                continue
             data = config.read_toml(path)
             features.append(config.dict_to_feature(data))
         return features
@@ -183,9 +199,12 @@ class FeatureManager:
         feature.prs.pop(repo_name, None)
         self._save_feature(feature)
 
-        # Prune this repo's checkpoint/WIP pinning refs
+        # Prune this repo's sandbox branch and checkpoint/WIP pinning refs
         try:
             repo = Repo(self.ws.get_repo(repo_name), self.ws.root)
+            git.run_git("worktree", "prune", cwd=repo.path, check=False)
+            git.run_git("branch", "-D", sandbox_branch(feature_name),
+                        cwd=repo.path, check=False)
             for ref in repo.list_refs(f"refs/mgit/checkpoint/{feature_name}/"):
                 repo.delete_ref(ref)
             for ref in repo.list_refs(f"refs/mgit/wip/{feature_name}/"):
@@ -260,6 +279,15 @@ class FeatureManager:
         # Default to all workspace repos
         names = repo_names if repo_names is not None else list(self.ws.repos.keys())
 
+        # Validate BEFORE creating anything — a typo'd repo name must not
+        # leave a half-created feature behind
+        validate_feature_name(feature_name)
+        for repo_name in names:
+            if repo_name not in self.ws.repos:
+                raise RepoNotFoundError(
+                    f"Repo '{repo_name}' not found in workspace"
+                )
+
         # Get or create feature
         try:
             feature = self.get(feature_name)
@@ -269,12 +297,6 @@ class FeatureManager:
         newly_added: list[str] = []
 
         for repo_name in names:
-            # Validate repo exists
-            if repo_name not in self.ws.repos:
-                raise RepoNotFoundError(
-                    f"Repo '{repo_name}' not found in workspace"
-                )
-
             # Enroll in feature if not already
             if repo_name not in feature.branches:
                 feature.branches[repo_name] = target
@@ -349,8 +371,22 @@ class FeatureManager:
         # Forked features branch from the SHA pinned at fork time
         start_point = feature.fork_base.get(repo_name)
 
-        wt_path.parent.mkdir(parents=True, exist_ok=True)
-        repo.add_worktree(wt_path, sb, start_point=start_point)
+        try:
+            wt_path.parent.mkdir(parents=True, exist_ok=True)
+            repo.add_worktree(wt_path, sb, start_point=start_point)
+        except BaseException as e:
+            if stashed:
+                # Put the user's changes back where they were; if even that
+                # fails, at least say where they went
+                try:
+                    repo.stash_pop()
+                except Exception:
+                    raise MgitError(
+                        f"Worktree creation failed and restoring your changes "
+                        f"also failed — they are in '{repo_name}' stash "
+                        f"'mgit-carry:{feature_name}': {e}"
+                    ) from e
+            raise
 
         # Pop stash in the worktree if we stashed something
         if stashed:
@@ -411,9 +447,19 @@ class FeatureManager:
         # Filter out repos already enrolled in the feature
         new_dirty = [(name, branch) for name, branch in dirty if name not in feature.branches]
 
+        # Newly synced repos inherit the feature's existing target branch when
+        # it's uniform (a feature started with --branch X must not silently
+        # enroll sync'd repos targeting the feature name instead of X)
+        existing_targets = set(feature.branches.values())
+        inherited = existing_targets.pop() if len(existing_targets) == 1 else None
+
         synced: list[str] = []
         for repo_name, _ in new_dirty:
-            self.start(feature_name, [repo_name], run_setup=False)
+            # activate=False: sync is enrollment maintenance, not a context
+            # switch — it must not move the shared active pointer under
+            # other sessions
+            self.start(feature_name, [repo_name], target_branch=inherited,
+                       run_setup=False, activate=False)
             do_carry = carry_repos is None or repo_name in carry_repos
             wt_path = self.materialize(feature_name, repo_name, carry=do_carry)
             if run_setup:
@@ -504,7 +550,8 @@ class FeatureManager:
         wip_from: dict[str, str] = {}
         parent_sb = sandbox_branch(parent_name)
 
-        for repo_name in parent.branches:
+        enrollable = [r for r in parent.branches if r in self.ws.repos]
+        for repo_name in enrollable:
             repo_path = self.ws.repo_path(repo_name)
             sha = None
             for ref in (f"refs/heads/{parent_sb}",
@@ -529,7 +576,7 @@ class FeatureManager:
 
         child = self.create(child_name, description=description or parent.description)
         child.parent = parent_name
-        child.branches = {repo_name: target for repo_name in parent.branches}
+        child.branches = {repo_name: target for repo_name in enrollable}
         child.fork_base = fork_base
         child.wip_from = wip_from
         self._save_feature(child)

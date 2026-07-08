@@ -35,13 +35,10 @@ def _resolve_repos(ws: Workspace, feature_name: str | None, repos_csv: str | Non
     if feature_name:
         resolved = _resolve_feature_name(ws, feature_name)
         fm = FeatureManager(ws)
-        try:
-            feat = fm.get(resolved)
-        except MgitError as e:
-            raise click.ClickException(str(e))
+        feat = fm.get(resolved)
         repo_names = list(feat.branches.keys())
         if not repo_names:
-            raise click.ClickException(
+            raise MgitError(
                 f"Feature '{resolved}' has no enrolled repos. "
                 "Use 'mgit feature start' to enroll repos."
             )
@@ -50,7 +47,7 @@ def _resolve_repos(ws: Workspace, feature_name: str | None, repos_csv: str | Non
         names = [n.strip() for n in repos_csv.split(",")]
         for n in names:
             if n not in ws.repos:
-                raise click.ClickException(f"Repo '{n}' not found in workspace")
+                raise MgitError(f"Repo '{n}' not found in workspace")
         return names
     else:
         return list(ws.repos.keys())
@@ -272,11 +269,19 @@ def commit(message, feature, repos, fail_fast, as_json):
     _finish("commit", result, as_json)
 
 
-@click.command("exec")
+@click.command("exec", context_settings={
+    "ignore_unknown_options": True,
+    "allow_interspersed_args": False,
+})
 @_common_options
 @click.argument("command", nargs=-1, required=True)
 def exec_cmd(command, feature, repos, fail_fast, as_json):
-    """Run an arbitrary command in each repo."""
+    """Run an arbitrary command in each repo.
+
+    mgit options (-f/-r/--fail-fast/--json) must come BEFORE the command;
+    everything from the first non-option token on is passed through verbatim
+    (so 'mgit exec -f . git clean -fd' runs exactly 'git clean -fd').
+    """
     if as_json:
         output.set_json_mode()
     ws = Workspace.find()

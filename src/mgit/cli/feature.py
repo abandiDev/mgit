@@ -109,10 +109,17 @@ def start(feature_name, repo_names, branch, description, materialize, carry, no_
 
     repo_list = list(repo_names) if repo_names else None
 
-    # Resolve carry_repos when materializing
+    # Resolve carry_repos when materializing. Only NEWLY enrolled repos get
+    # materialized, so already-enrolled ones must not trigger carry prompts
+    # (or headless refusals) for a materialization that won't happen.
     carry_repos = None
     if materialize:
         names_to_check = repo_list if repo_list is not None else list(ws.repos.keys())
+        try:
+            already_enrolled = set(fm.get(feature_name).branches)
+            names_to_check = [n for n in names_to_check if n not in already_enrolled]
+        except MgitError:
+            pass  # feature doesn't exist yet — everything is newly enrolled
         if carry is True:
             # --carry: carry all dirty repos without prompting
             carry_repos = {
@@ -176,9 +183,11 @@ def _materialize_handler(repo_name, carry, no_setup):
     # Check if already materialized (setup only runs for newly created worktrees)
     already_materialized = fm.is_materialized(active, repo_name)
 
-    # Detect dirty repo and resolve carry behavior
+    # Carry only matters when the worktree is about to be created —
+    # materialize() is a no-op on an existing worktree, so prompting or
+    # claiming "changes carried" would be a lie
     do_carry = False
-    if carry is not False:
+    if not already_materialized and carry is not False:
         dirty = find_dirty_repos(ws, [repo_name])
         if dirty:
             if carry is None:
@@ -189,8 +198,15 @@ def _materialize_handler(repo_name, carry, no_setup):
 
     wt_path = fm.materialize(active, repo_name, carry=do_carry)
 
-    suffix = " (changes carried)" if do_carry else ""
-    click.echo(f"  {repo_name}: materialized -> {wt_path}/{suffix}")
+    if already_materialized:
+        note = ""
+        if find_dirty_repos(ws, [repo_name]):
+            note = (" (origin repo has uncommitted changes — NOT carried; "
+                    "the worktree already existed)")
+        click.echo(f"  {repo_name}: already materialized -> {wt_path}/{note}")
+    else:
+        suffix = " (changes carried)" if do_carry else ""
+        click.echo(f"  {repo_name}: materialized -> {wt_path}/{suffix}")
 
     # Run setup only for newly created worktrees
     if not already_materialized and not no_setup:
@@ -540,7 +556,7 @@ def log(feature_name, limit, type_filter, commits, as_json):
 
     if commits:
         entries = entries + _feature_commits(ws, feat)
-        entries.sort(key=lambda e: e.get("ts", ""))
+        entries.sort(key=_ts_sort_key)
 
     if limit and len(entries) > limit:
         entries = entries[-limit:]
@@ -560,6 +576,24 @@ def log(feature_name, limit, type_filter, commits, as_json):
         click.echo(f"{e.get('ts', '')} {who}/{kind}{repo}: {e.get('text', '')}")
     if errors:
         click.secho(f"({errors} corrupt journal line(s) skipped)", fg="yellow", err=True)
+
+
+def _ts_sort_key(entry):
+    """Chronological sort key tolerant of mixed ISO forms.
+
+    Journal entries use UTC 'Z'; git %aI uses local offsets — comparing the
+    raw strings orders them wrong across timezones.
+    """
+    from datetime import datetime, timezone
+
+    try:
+        dt = datetime.fromisoformat(entry.get("ts", "").replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+    if dt.tzinfo is None:
+        # Offset-less timestamps would make aware/naive comparison raise
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def _feature_commits(ws, feat) -> list:
@@ -772,6 +806,11 @@ def publish(feature_name, title, draft, as_json):
     new_urls: dict[str, str] = {}
 
     for repo_name, target in feat.branches.items():
+        if repo_name not in ws.repos:
+            result.results.append(RepoOpResult(
+                repo=repo_name, status=OpStatus.SKIPPED,
+                message="not registered in workspace"))
+            continue
         repo_info = ws.get_repo(repo_name)
 
         if not fm.is_materialized(name, repo_name):
@@ -881,6 +920,8 @@ def checks(feature_name, as_json):
 
     rows = []
     for repo_name, target in feat.branches.items():
+        if repo_name not in ws.repos:
+            continue
         repo_info = ws.get_repo(repo_name)
         forge = get_forge(repo_info.url)
         if forge is None:

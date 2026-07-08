@@ -247,10 +247,16 @@ section "agent contract: exit codes, non-TTY guard, context"
 expect_exit "domain error exits 2" 2 "$MGIT" feature show nope
 expect_exit "usage error exits 3" 3 "$MGIT" bogus-command
 expect_exit "json error envelope exits 2" 2 "$MGIT" feature brief --json -f nope
+# The refusal only applies when a worktree is about to be created — an
+# already-materialized repo is a no-op and must exit 0 instead
+"$MGIT" feature start guard-test -r svc-api --no-activate >/dev/null
 echo dirty >> svc-api/README.md
 expect_exit "headless carry prompt refuses (exit 2)" 2 \
+    env MGIT_FEATURE=guard-test "$MGIT" feature materialize svc-api < /dev/null
+expect_exit "already-materialized repo is a no-op (exit 0)" 0 \
     "$MGIT" feature materialize svc-api < /dev/null
 git -C svc-api checkout -q README.md
+env MGIT_FEATURE=guard-test "$MGIT" feature delete guard-test >/dev/null
 "$MGIT" context -f . > "$SANDBOX/context.json"
 json_check "deep context has live repo facts" \
     "obj['mgit_schema'] == 1 and obj['feature']['repo_facts'][0]['materialized'] is True" < "$SANDBOX/context.json"

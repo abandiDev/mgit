@@ -58,5 +58,10 @@ def initialized_workspace(workspace_with_repos):
 
 @pytest.fixture(autouse=True)
 def clean_mgit_env(monkeypatch):
-    """Keep the suite hermetic from the developer's shell environment."""
+    """Keep the suite hermetic: shell env and module-global output mode."""
+    from mgit.utils import output
+
     monkeypatch.delenv("MGIT_FEATURE", raising=False)
+    output.set_json_mode(False)
+    yield
+    output.set_json_mode(False)

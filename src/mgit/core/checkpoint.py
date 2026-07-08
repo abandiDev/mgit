@@ -14,6 +14,7 @@ cp-NNNN.memory.toml copy so working memory rewinds together with code.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -46,18 +47,39 @@ class CheckpointManager:
         return self._dir(feature_name) / f"{cp_id}.memory.toml"
 
     def _alloc_id(self, feature_name: str) -> str:
-        """Allocate the next checkpoint id race-safely via O_CREAT|O_EXCL."""
+        """Allocate the next checkpoint id race-safely via O_CREAT|O_EXCL.
+
+        Ids are never reused: a .seq high-water mark survives checkpoint
+        deletion, so journal references to deleted checkpoints stay
+        unambiguous (deleting cp-0002 must not let a new save become a
+        different cp-0002).
+        """
         d = self._dir(feature_name)
         d.mkdir(parents=True, exist_ok=True)
-        n = 1
+        seq_path = d / ".seq"
+        high = 0
+        try:
+            high = int(seq_path.read_text().strip())
+        except (OSError, ValueError):
+            pass
+        for path in d.glob("cp-*.toml"):
+            m = re.match(r"cp-(\d+)", path.stem)
+            if m:
+                high = max(high, int(m.group(1)))
+        n = high + 1
         while True:
             cp_id = f"cp-{n:04d}"
             try:
                 fd = os.open(d / f"{cp_id}.toml", os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 os.close(fd)
-                return cp_id
+                break
             except FileExistsError:
                 n += 1
+        try:
+            seq_path.write_text(str(n))
+        except OSError:
+            pass
+        return cp_id
 
     def save(self, fm, feature_name: str, label: str = "") -> CheckpointInfo:
         """Checkpoint every materialized repo of a feature (non-destructive)."""
@@ -66,6 +88,10 @@ class CheckpointManager:
         try:
             repos: dict[str, CheckpointRepoState] = {}
             for repo_name in feature.branches:
+                # Enrolled but unregistered repos (workspace repo remove)
+                # can't be checkpointed — skip like find_dirty_repos does
+                if repo_name not in self.ws.repos:
+                    continue
                 if not fm.is_materialized(feature_name, repo_name):
                     continue
                 wt_path = self.ws.worktree_path(feature_name, repo_name)
@@ -114,8 +140,17 @@ class CheckpointManager:
             )
             return info
         except BaseException:
-            # Don't leave an empty placeholder manifest behind
+            # Don't leave an empty placeholder manifest or orphaned pinning
+            # refs behind
             self._manifest_path(feature_name, cp_id).unlink(missing_ok=True)
+            for repo_name in feature.branches:
+                if repo_name not in self.ws.repos:
+                    continue
+                try:
+                    Repo(self.ws.get_repo(repo_name), self.ws.root).delete_ref(
+                        checkpoint_ref(feature_name, cp_id))
+                except Exception:
+                    continue
             raise
 
     def get(self, feature_name: str, cp_id: str) -> CheckpointInfo:
@@ -162,14 +197,17 @@ class CheckpointManager:
         )
 
         for repo_name, st in info.repos.items():
-            if repo_name not in feature.branches:
+            if repo_name not in feature.branches or repo_name not in self.ws.repos:
                 continue
             if not fm.is_materialized(feature_name, repo_name):
                 # Re-materialize so the restore can land
                 fm.materialize(feature_name, repo_name)
             wt_path = self.ws.worktree_path(feature_name, repo_name)
             wt_repo = Repo.at_worktree(wt_path, self.ws.get_repo(repo_name))
-            wt_repo.restore_to(st.head, st.snapshot)
+            # Pass the recorded branch: the user may have switched the
+            # worktree to another branch since the checkpoint, and resetting
+            # would silently rewrite that branch instead
+            wt_repo.restore_to(st.head, st.snapshot, branch=st.branch or None)
 
         # Rewind the working memory to the checkpointed copy
         mem_copy = self._memory_copy_path(feature_name, cp_id)

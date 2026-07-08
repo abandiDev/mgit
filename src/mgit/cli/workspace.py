@@ -5,7 +5,6 @@ from pathlib import Path
 import click
 
 from mgit.core.workspace import Workspace
-from mgit.utils.errors import WorkspaceExistsError, WorkspaceNotFoundError
 
 
 @click.command()
@@ -22,10 +21,7 @@ def init(name, no_interactive):
     else:
         path = Path.cwd()
 
-    try:
-        ws, found_repos = Workspace.init(path, name=name, scan=True, auto_add=False)
-    except WorkspaceExistsError as e:
-        raise click.ClickException(str(e))
+    ws, found_repos = Workspace.init(path, name=name, scan=True, auto_add=False)
 
     click.echo(f"Initializing mgit workspace in {ws.root}...")
     click.echo()
@@ -99,10 +95,7 @@ def remove(force):
 
     Repos and other files are left untouched.
     """
-    try:
-        ws = Workspace.find()
-    except WorkspaceNotFoundError as e:
-        raise click.ClickException(str(e))
+    ws = Workspace.find()
 
     if not force:
         click.echo(f"This will remove the mgit workspace at {ws.root}")

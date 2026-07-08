@@ -24,24 +24,18 @@ def add(url_or_path, name):
     # Determine if it's a URL or a local path
     if url_or_path.startswith(("http://", "https://", "git@", "ssh://", "git://")):
         click.echo(f"Cloning {url_or_path}...")
-        try:
-            info = repo_ops.add_repo_from_url(ws.root, url_or_path, name=name)
-        except MgitError as e:
-            raise click.ClickException(str(e))
+        info = repo_ops.add_repo_from_url(ws.root, url_or_path, name=name)
     else:
         local = Path(url_or_path).resolve()
         if not local.is_dir():
-            raise click.ClickException(f"Path not found: {local}")
+            raise MgitError(f"Path not found: {local}")
         click.echo(f"Linking {local}...")
         try:
             info = repo_ops.add_repo_from_path(ws.root, local, name=name)
-        except (MgitError, ValueError) as e:
-            raise click.ClickException(str(e))
+        except ValueError as e:
+            raise MgitError(str(e))
 
-    try:
-        ws.add_repo(info)
-    except MgitError as e:
-        raise click.ClickException(str(e))
+    ws.add_repo(info)
 
     click.echo(f"Added repo '{info.name}' ({info.default_branch})")
 
@@ -51,10 +45,7 @@ def add(url_or_path, name):
 def remove(name):
     """Remove a repo from the workspace (does not delete files)."""
     ws = Workspace.find()
-    try:
-        ws.remove_repo(name)
-    except MgitError as e:
-        raise click.ClickException(str(e))
+    ws.remove_repo(name)
     click.echo(f"Removed repo '{name}' from workspace.")
 
 
@@ -72,10 +63,7 @@ def setup(name, command, clear):
       mgit repo setup frontend --clear        # remove setup command
     """
     ws = Workspace.find()
-    try:
-        repo_info = ws.get_repo(name)
-    except MgitError as e:
-        raise click.ClickException(str(e))
+    repo_info = ws.get_repo(name)
 
     if clear:
         repo_info.setup = None

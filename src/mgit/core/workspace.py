@@ -215,7 +215,10 @@ class Workspace:
                 continue
             # Follow symlinks for the git check
             actual = child.resolve()
-            if not git.is_git_repo(actual):
+            # The child must BE a repo root, not merely sit inside one — a
+            # workspace nested in some outer git repo must not register every
+            # plain subdirectory as a "repo" of the outer repository
+            if git.repo_root(actual) != actual:
                 continue
             branch = git.get_current_branch(actual)
             url = git.get_remote_url(actual)
@@ -364,9 +367,19 @@ class Workspace:
     def detect_repo_from_cwd(self, cwd: Path | None = None) -> str | None:
         """Determine which registered repo contains cwd (deepest match).
 
+        Also recognizes feature worktrees: inside
+        .mgit/worktrees/<feature>/<repo>/... the repo is <repo>.
+
         Returns the repo name, or None if cwd is not inside any registered repo.
         """
         target = (cwd or Path.cwd()).resolve()
+
+        try:
+            rel = target.relative_to(self.worktrees_dir.resolve())
+            if len(rel.parts) >= 2 and rel.parts[1] in self.repos:
+                return rel.parts[1]
+        except ValueError:
+            pass
         best_match: str | None = None
         best_depth = -1
 

@@ -91,6 +91,14 @@ def get_remote_url(repo_path: Path) -> str | None:
     return None
 
 
+def repo_root(path: Path) -> Path | None:
+    """The repository toplevel containing path, or None if not in a repo."""
+    result = run_git("rev-parse", "--show-toplevel", cwd=path, check=False)
+    if result.returncode == 0 and result.stdout.strip():
+        return Path(result.stdout.strip())
+    return None
+
+
 def is_git_repo(path: Path) -> bool:
     """Check if a path is a git repository."""
     result = run_git(
