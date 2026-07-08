@@ -183,6 +183,7 @@ class FeatureManager:
         description: str = "",
         materialize: bool = False,
         run_setup: bool = True,
+        carry_repos: set[str] | None = None,
     ) -> tuple[FeatureInfo, list[str]]:
         """Start working on a feature: create if needed, enroll repos.
 
@@ -192,8 +193,11 @@ class FeatureManager:
             target_branch: Remote target branch (default = feature name).
             description: Description (only used on initial creation).
             materialize: If True, create worktrees for newly enrolled repos
-                immediately, auto-carrying dirty changes.
+                immediately.
             run_setup: If True, run configured setup commands after materialization.
+            carry_repos: Set of repo names to carry dirty changes for.
+                When None (default), auto-detects dirty repos and carries all.
+                When provided, only repos in this set are carried.
 
         Returns:
             Tuple of (feature, list_of_newly_added_repo_names).
@@ -231,17 +235,19 @@ class FeatureManager:
 
         # Materialize worktrees for newly enrolled repos if requested
         if materialize and newly_added:
-            dirty_set = {
-                name for name, _ in find_dirty_repos(self.ws, newly_added)
-            }
+            if carry_repos is None:
+                # Auto-detect: carry all dirty repos (backwards compat)
+                carry_repos = {
+                    name for name, _ in find_dirty_repos(self.ws, newly_added)
+                }
             for repo_name in newly_added:
-                wt_path = self.work(feature_name, repo_name, carry=repo_name in dirty_set)
+                wt_path = self.materialize(feature_name, repo_name, carry=repo_name in carry_repos)
                 if run_setup:
                     self.run_setup(repo_name, wt_path)
 
         return feature, newly_added
 
-    def work(self, feature_name: str, repo_name: str, carry: bool = False) -> Path:
+    def materialize(self, feature_name: str, repo_name: str, carry: bool = False) -> Path:
         """Materialize a single repo's worktree for an existing feature.
 
         Args:
@@ -286,16 +292,23 @@ class FeatureManager:
 
         return wt_path
 
-    def sync(self, feature_name: str, run_setup: bool = True) -> list[str]:
+    def sync(
+        self,
+        feature_name: str,
+        run_setup: bool = True,
+        carry_repos: set[str] | None = None,
+    ) -> list[str]:
         """Discover dirty repos and enroll + materialize them into the feature.
 
         Scans all workspace repos for uncommitted changes, enrolls any that
-        aren't already part of the feature, and materializes worktrees with
-        carry=True so changes are moved into the feature worktree.
+        aren't already part of the feature, and materializes worktrees.
 
         Args:
             feature_name: Name of the feature to sync into.
             run_setup: If True, run configured setup commands after materialization.
+            carry_repos: Set of repo names to carry dirty changes for.
+                When None (default), carries all dirty repos (current behavior).
+                When provided, only repos in this set are carried.
 
         Returns:
             List of newly synced repo names.
@@ -311,7 +324,8 @@ class FeatureManager:
         synced: list[str] = []
         for repo_name, _ in new_dirty:
             self.start(feature_name, [repo_name], run_setup=False)
-            wt_path = self.work(feature_name, repo_name, carry=True)
+            do_carry = carry_repos is None or repo_name in carry_repos
+            wt_path = self.materialize(feature_name, repo_name, carry=do_carry)
             if run_setup:
                 self.run_setup(repo_name, wt_path)
             synced.append(repo_name)

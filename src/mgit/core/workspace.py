@@ -32,8 +32,8 @@ Run `mgit context` for full workspace state as JSON.
 ```
 mgit feature start <name> -r <repo1> -r <repo2>    # Enroll specific repos (metadata only)
 mgit feature start <name> -r <repo1> --materialize  # Enroll and create worktrees immediately
-mgit feature work <repo>                            # Materialize a worktree on demand
-mgit feature work <repo> --carry                    # Materialize and carry uncommitted changes
+mgit feature materialize <repo>                     # Materialize a worktree on demand
+mgit feature materialize <repo> --carry             # Materialize and carry uncommitted changes
 mgit feature sync                                   # Discover dirty repos, enroll + materialize them
 mgit repo setup <repo> "npm install"                # Set per-repo setup command
 mgit setup -f .                                     # Run setup commands across feature repos
@@ -45,7 +45,7 @@ mgit feature switch <name>                          # Set active feature
 
 ### Conventions
 - `feature start` enrolls repos as metadata — pass `--materialize` to create worktrees immediately
-- `feature work <repo>` materializes a single repo's worktree on demand
+- `feature materialize <repo>` materializes a single repo's worktree on demand
 - `feature sync` finds dirty repos in the workspace and enrolls them into the active feature
 - `repo setup` configures a per-repo setup command (e.g. `npm install`) that runs after worktree materialization
 - Bulk commands (`status`, `pull`, `push`, `commit`, `exec`, `setup`) skip unmaterialized repos

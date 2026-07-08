@@ -68,11 +68,11 @@ Each worktree gets a sandbox branch (`mgit/auth-refactor`) checked out. Your ori
 
 ```bash
 # Materialize a worktree on demand (if you didn't use --materialize)
-mgit feature work user-service
+mgit feature materialize user-service
 # user-service: materialized -> .mgit/worktrees/auth-refactor/user-service/
 
 # If the repo has uncommitted changes, carry them into the worktree
-mgit feature work api-gateway --carry
+mgit feature materialize api-gateway --carry
 # api-gateway: materialized -> .mgit/worktrees/auth-refactor/api-gateway/ (changes carried)
 
 # Edit files in the worktree directories
@@ -155,7 +155,7 @@ mgit push -f .
 | Command | Description |
 |---|---|
 | `mgit feature start <name> [-r REPO]... [-m]` | Create/enroll repos, optionally materialize worktrees (`-m`) |
-| `mgit feature work [REPO] [--carry]` | Materialize a worktree for a repo in the active feature |
+| `mgit feature materialize [REPO] [--carry]` | Materialize a worktree for a repo in the active feature |
 | `mgit feature sync` | Discover dirty repos, enroll + materialize them into the active feature |
 | `mgit feature switch <name>` | Set the active feature |
 | `mgit feature activate <name>` | Set active feature (alias, no side effects) |

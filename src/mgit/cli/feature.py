@@ -1,4 +1,4 @@
-"""CLI commands: mgit feature {start,work,switch,activate,deactivate,show,list,delete,remove-repo}."""
+"""CLI commands: mgit feature {start,materialize,switch,activate,deactivate,show,list,delete,remove-repo}."""
 
 import click
 
@@ -38,10 +38,12 @@ def feature():
 @click.option("--branch", default=None, help="Remote target branch (default: feature name).")
 @click.option("--description", "-d", default="", help="Feature description (only on creation).")
 @click.option("--materialize", "-m", is_flag=True, default=False,
-              help="Materialize worktrees immediately (auto-carries dirty changes).")
+              help="Materialize worktrees immediately.")
+@click.option("--carry/--no-carry", default=None,
+              help="Carry uncommitted changes to worktrees (default: prompt per repo).")
 @click.option("--no-setup", is_flag=True, default=False,
               help="Skip running setup commands after materialization.")
-def start(feature_name, repo_names, branch, description, materialize, no_setup):
+def start(feature_name, repo_names, branch, description, materialize, carry, no_setup):
     """Start a feature: create/enroll repos.
 
     If no -r is given, enrolls all workspace repos.
@@ -52,6 +54,30 @@ def start(feature_name, repo_names, branch, description, materialize, no_setup):
 
     repo_list = list(repo_names) if repo_names else None
 
+    # Resolve carry_repos when materializing
+    carry_repos = None
+    if materialize:
+        names_to_check = repo_list if repo_list is not None else list(ws.repos.keys())
+        if carry is True:
+            # --carry: carry all dirty repos without prompting
+            carry_repos = {
+                name for name, _ in find_dirty_repos(ws, names_to_check)
+            }
+        elif carry is False:
+            # --no-carry: skip carry for all
+            carry_repos = set()
+        else:
+            # Neither flag: prompt per dirty repo
+            dirty = find_dirty_repos(ws, names_to_check)
+            carry_repos = set()
+            for name, br in dirty:
+                if click.confirm(
+                    f"  {name} has uncommitted changes (on {br}). "
+                    f"Carry to feature worktree?",
+                    default=False,
+                ):
+                    carry_repos.add(name)
+
     try:
         feat, newly_added = fm.start(
             feature_name, repo_list,
@@ -59,6 +85,7 @@ def start(feature_name, repo_names, branch, description, materialize, no_setup):
             description=description,
             materialize=materialize,
             run_setup=not no_setup,
+            carry_repos=carry_repos,
         )
     except MgitError as e:
         raise click.ClickException(str(e))
@@ -70,7 +97,9 @@ def start(feature_name, repo_names, branch, description, materialize, no_setup):
     for repo_name in newly_added:
         if materialize:
             wt_path = ws.worktree_path(feature_name, repo_name)
-            click.echo(f"  + {repo_name}: {wt_path}/")
+            carried = carry_repos is not None and repo_name in carry_repos
+            suffix = " (changes carried)" if carried else ""
+            click.echo(f"  + {repo_name}: {wt_path}/{suffix}")
             if not no_setup:
                 _print_setup_status(ws, fm, repo_name, wt_path)
         else:
@@ -78,20 +107,11 @@ def start(feature_name, repo_names, branch, description, materialize, no_setup):
     click.echo(f"Active feature: {feature_name}")
     if not materialize:
         click.echo()
-        click.echo("Use 'mgit feature work <repo>' to materialize a worktree.")
+        click.echo("Use 'mgit feature materialize <repo>' to materialize a worktree.")
 
 
-@feature.command("work")
-@click.argument("repo_name", required=False)
-@click.option("--carry/--no-carry", default=None,
-              help="Carry uncommitted changes to the feature worktree.")
-@click.option("--no-setup", is_flag=True, default=False,
-              help="Skip running setup commands after materialization.")
-def work(repo_name, carry, no_setup):
-    """Materialize a worktree for a repo in the active feature.
-
-    If REPO_NAME is omitted, auto-detects from current directory.
-    """
+def _materialize_handler(repo_name, carry, no_setup):
+    """Shared handler for materialize and work commands."""
     ws = Workspace.find()
     fm = FeatureManager(ws)
 
@@ -130,7 +150,7 @@ def work(repo_name, carry, no_setup):
                 do_carry = True  # --carry flag
 
     try:
-        wt_path = fm.work(active, repo_name, carry=do_carry)
+        wt_path = fm.materialize(active, repo_name, carry=do_carry)
     except MgitError as e:
         raise click.ClickException(str(e))
 
@@ -142,15 +162,41 @@ def work(repo_name, carry, no_setup):
         _print_setup_status(ws, fm, repo_name, wt_path)
 
 
-@feature.command("sync")
+@feature.command("materialize")
+@click.argument("repo_name", required=False)
+@click.option("--carry/--no-carry", default=None,
+              help="Carry uncommitted changes to the feature worktree.")
 @click.option("--no-setup", is_flag=True, default=False,
               help="Skip running setup commands after materialization.")
-def sync(no_setup):
+def materialize_cmd(repo_name, carry, no_setup):
+    """Materialize a worktree for a repo in the active feature.
+
+    If REPO_NAME is omitted, auto-detects from current directory.
+    """
+    _materialize_handler(repo_name, carry, no_setup)
+
+
+@feature.command("work", hidden=True)
+@click.argument("repo_name", required=False)
+@click.option("--carry/--no-carry", default=None,
+              help="Carry uncommitted changes to the feature worktree.")
+@click.option("--no-setup", is_flag=True, default=False,
+              help="Skip running setup commands after materialization.")
+def work(repo_name, carry, no_setup):
+    """Materialize a worktree for a repo in the active feature (alias for materialize)."""
+    _materialize_handler(repo_name, carry, no_setup)
+
+
+@feature.command("sync")
+@click.option("--carry/--no-carry", default=None,
+              help="Carry uncommitted changes to worktrees (default: prompt per repo).")
+@click.option("--no-setup", is_flag=True, default=False,
+              help="Skip running setup commands after materialization.")
+def sync(carry, no_setup):
     """Discover dirty repos and enroll them into the active feature.
 
     Scans all workspace repos for uncommitted changes, enrolls any that
-    aren't already part of the active feature, and materializes worktrees
-    carrying changes over.
+    aren't already part of the active feature, and materializes worktrees.
     """
     ws = Workspace.find()
     fm = FeatureManager(ws)
@@ -161,15 +207,46 @@ def sync(no_setup):
             "No active feature. Use 'mgit feature start' first."
         )
 
+    # Resolve carry_repos
+    carry_repos = None
+    if carry is not None:
+        feature = fm.get(active)
+        all_repo_names = list(ws.repos.keys())
+        dirty = find_dirty_repos(ws, all_repo_names)
+        new_dirty = [(name, br) for name, br in dirty if name not in feature.branches]
+
+        if carry is True:
+            carry_repos = {name for name, _ in new_dirty}
+        else:
+            # --no-carry
+            carry_repos = set()
+    else:
+        # Neither flag: prompt per dirty repo
+        feature = fm.get(active)
+        all_repo_names = list(ws.repos.keys())
+        dirty = find_dirty_repos(ws, all_repo_names)
+        new_dirty = [(name, br) for name, br in dirty if name not in feature.branches]
+
+        carry_repos = set()
+        for name, br in new_dirty:
+            if click.confirm(
+                f"  {name} has uncommitted changes (on {br}). "
+                f"Carry to feature worktree?",
+                default=False,
+            ):
+                carry_repos.add(name)
+
     try:
-        synced = fm.sync(active, run_setup=not no_setup)
+        synced = fm.sync(active, run_setup=not no_setup, carry_repos=carry_repos)
     except MgitError as e:
         raise click.ClickException(str(e))
 
     if synced:
         click.echo(f"Synced {len(synced)} repo(s) into feature '{active}':")
         for name in synced:
-            click.echo(f"  + {name} (changes carried)")
+            carried = carry_repos is not None and name in carry_repos
+            suffix = " (changes carried)" if carried else ""
+            click.echo(f"  + {name}{suffix}")
     else:
         click.echo("No new dirty repos to sync.")
 

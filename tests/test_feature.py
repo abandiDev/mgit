@@ -74,8 +74,8 @@ class TestFeatureDelete:
         fm = FeatureManager(ws)
 
         fm.start("to-delete", ["repo-a", "repo-b"])
-        fm.work("to-delete", "repo-a")
-        fm.work("to-delete", "repo-b")
+        fm.materialize("to-delete", "repo-a")
+        fm.materialize("to-delete", "repo-b")
         wt_a = ws.worktree_path("to-delete", "repo-a")
         wt_b = ws.worktree_path("to-delete", "repo-b")
         assert wt_a.exists()
@@ -128,7 +128,7 @@ class TestFeatureRemoveRepo:
         ws = initialized_workspace
         fm = FeatureManager(ws)
         fm.start("feat", ["repo-a", "repo-b"])
-        fm.work("feat", "repo-a")
+        fm.materialize("feat", "repo-a")
         fm.remove_repo("feat", "repo-a")
         feat = fm.get("feat")
         assert "repo-a" not in feat.branches
@@ -146,8 +146,8 @@ class TestFeatureRemoveRepo:
         fm = FeatureManager(ws)
 
         fm.start("feat", ["repo-a", "repo-b"])
-        fm.work("feat", "repo-a")
-        fm.work("feat", "repo-b")
+        fm.materialize("feat", "repo-a")
+        fm.materialize("feat", "repo-b")
         wt_a = ws.worktree_path("feat", "repo-a")
         assert wt_a.exists()
 
@@ -233,8 +233,8 @@ class TestFeatureStart:
         fm.start("feat-b", ["repo-a"])
 
         # Materialize both
-        fm.work("feat-a", "repo-a")
-        fm.work("feat-b", "repo-a")
+        fm.materialize("feat-a", "repo-a")
+        fm.materialize("feat-b", "repo-a")
 
         wt_a = ws.worktree_path("feat-a", "repo-a")
         wt_b = ws.worktree_path("feat-b", "repo-a")
@@ -402,13 +402,13 @@ class TestFindDirtyRepos:
         assert result == []
 
 
-class TestFeatureWork:
+class TestFeatureMaterialize:
     def test_work_creates_worktree(self, initialized_workspace):
         ws = initialized_workspace
         fm = FeatureManager(ws)
 
         fm.start("my-feat", ["repo-a"])
-        wt_path = fm.work("my-feat", "repo-a")
+        wt_path = fm.materialize("my-feat", "repo-a")
 
         assert wt_path.exists()
         assert wt_path.is_dir()
@@ -419,7 +419,7 @@ class TestFeatureWork:
         fm = FeatureManager(ws)
 
         fm.start("my-feat", ["repo-a"])
-        wt_path = fm.work("my-feat", "repo-a")
+        wt_path = fm.materialize("my-feat", "repo-a")
 
         branch = git.get_current_branch(wt_path)
         assert branch == "mgit/my-feat"
@@ -429,8 +429,8 @@ class TestFeatureWork:
         fm = FeatureManager(ws)
 
         fm.start("my-feat", ["repo-a"])
-        path1 = fm.work("my-feat", "repo-a")
-        path2 = fm.work("my-feat", "repo-a")
+        path1 = fm.materialize("my-feat", "repo-a")
+        path2 = fm.materialize("my-feat", "repo-a")
 
         assert path1 == path2
 
@@ -440,7 +440,7 @@ class TestFeatureWork:
 
         fm.start("my-feat", ["repo-a"])
         with pytest.raises(RepoNotFoundError):
-            fm.work("my-feat", "repo-b")
+            fm.materialize("my-feat", "repo-b")
 
     def test_work_carry_moves_changes_to_worktree(self, initialized_workspace):
         """Dirty file should appear in worktree, original should be clean."""
@@ -454,7 +454,7 @@ class TestFeatureWork:
         assert repo_a.is_dirty()
 
         fm.start("carry-feat", ["repo-a"])
-        wt_path = fm.work("carry-feat", "repo-a", carry=True)
+        wt_path = fm.materialize("carry-feat", "repo-a", carry=True)
 
         # Worktree should have the dirty file
         assert (wt_path / "secret.txt").exists()
@@ -473,7 +473,7 @@ class TestFeatureWork:
         (repo_a.path / "secret.txt").write_text("local-secret")
 
         fm.start("no-carry-feat", ["repo-a"])
-        wt_path = fm.work("no-carry-feat", "repo-a")
+        wt_path = fm.materialize("no-carry-feat", "repo-a")
 
         # Worktree should NOT have the dirty file
         assert not (wt_path / "secret.txt").exists()
@@ -491,7 +491,7 @@ class TestFeatureWork:
         (repo_a.path / "untracked.txt").write_text("new-file")
 
         fm.start("untracked-feat", ["repo-a"])
-        wt_path = fm.work("untracked-feat", "repo-a", carry=True)
+        wt_path = fm.materialize("untracked-feat", "repo-a", carry=True)
 
         assert (wt_path / "untracked.txt").exists()
         assert (wt_path / "untracked.txt").read_text() == "new-file"
@@ -582,5 +582,5 @@ class TestIsMaterialized:
         fm = FeatureManager(ws)
 
         fm.start("feat", ["repo-a"])
-        fm.work("feat", "repo-a")
+        fm.materialize("feat", "repo-a")
         assert fm.is_materialized("feat", "repo-a")
