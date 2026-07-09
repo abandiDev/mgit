@@ -18,6 +18,7 @@ CONFIG_FILE = "config.toml"
 FEATURES_DIR = "features"
 WORKTREES_DIR = "worktrees"
 CHECKPOINTS_DIR = "checkpoints"
+SKILLS_DIR = "skills"
 ACTIVE_FILE = "active"
 
 AGENT_MD_TEMPLATE = """\
@@ -94,6 +95,25 @@ mgit feature checks                                 # CI/review/merge status of 
 PR bodies are generated from the working memory and cross-link sibling PRs;
 re-publishing is idempotent (pushes new commits, updates existing PRs).
 
+### Learned Skills (durable memory across features)
+Working memory is per-feature and transient. `mgit skill` distills the *durable*
+lessons out of the journals — recurring decisions, conventions, handoffs — into
+reviewable skills that, once approved, appear in every feature's ambient brief.
+```
+mgit skill distill                                  # Mine durable skills from steering across all features
+mgit skill drafts                                   # Drafts awaiting review
+mgit skill show <slug>                              # Read a draft's full SKILL.md
+mgit skill approve <slug> [--run-verify]            # Promote a draft; --run-verify runs its check first
+mgit skill reject <slug> --reason "..."             # Tombstone it (never re-proposed)
+mgit skill list                                     # Active skills (also shown in the ambient brief)
+mgit skill doctor                                   # Backlog: drafts, parked candidates, unverified skills
+```
+Distillation calls the local `claude` CLI once (configure under `[skills]` in
+`.mgit/config.toml`: `claude_bin`, `model`, `allow_auto_verify`). A model-written
+`verify_command` never runs during distill unless `allow_auto_verify=true`; by
+default it runs only at `mgit skill approve --run-verify`, under your eye.
+Nothing becomes an active skill without explicit `approve`.
+
 ### Agent Contract
 - Exit codes: 0 success | 1 bulk partial failure | 2 domain error | 3 usage error | 4 internal error
 - `--json` on context/brief/plan/log/tree/checkpoint/bulk commands emits one
@@ -142,6 +162,7 @@ class Workspace:
         self.features_dir = self.mgit_dir / FEATURES_DIR
         self.worktrees_dir = self.mgit_dir / WORKTREES_DIR
         self.checkpoints_dir = self.mgit_dir / CHECKPOINTS_DIR
+        self.skills_dir = self.mgit_dir / SKILLS_DIR
         self.name: str = root.name
         self.repos: dict[str, RepoInfo] = {}
 

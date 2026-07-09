@@ -1,0 +1,177 @@
+"""CLI commands: mgit skill {distill,list,drafts,approve,reject,doctor}.
+
+Distill durable skills from the working-memory journals, review them, and let
+approved skills flow into the ambient worktree brief. Fully flag-driven (no
+interactive prompts) so it stays machine-safe under the agent contract.
+"""
+
+import click
+
+from mgit.core.skill import SkillManager, list_drafts, scan_active
+from mgit.core.workspace import Workspace
+from mgit.utils import output
+
+
+def _skill_to_dict(s) -> dict:
+    return {
+        "slug": s.slug,
+        "title": s.title,
+        "description": s.description,
+        "kind": s.kind,
+        "scope_level": s.scope_level,
+        "status": s.status,
+        "paths": s.paths,
+        "verify_command": s.verify_command,
+        "verify_pending": s.verify_pending,
+        "verified_at": s.verified_at,
+        "updates": s.updates,
+        "features": s.features,
+        "created_at": s.created_at,
+        "approved_at": s.approved_at,
+    }
+
+
+@click.group()
+def skill():
+    """Distill durable skills from working memory and review them."""
+
+
+@skill.command("distill")
+@click.option("--feature", "-f", "feature_name", default=None,
+              help="Distill one feature's journal (default: all features).")
+@click.option("--dry-run", is_flag=True, help="Print the distiller prompt, call nothing.")
+@click.option("--json", "as_json", is_flag=True, help="Emit a JSON envelope.")
+def distill(feature_name, dry_run, as_json):
+    """Mine durable, reusable skills from steering recorded across features."""
+    if as_json:
+        output.set_json_mode()
+    ws = Workspace.find()
+    feature = ws.resolve_feature(feature_name) if feature_name else None
+    results = SkillManager(ws).distill(feature=feature, dry_run=dry_run)
+    if as_json:
+        output.emit("skill.distill", {"feature": feature, "results": results})
+        return
+    for line in results:
+        click.echo(line)
+
+
+@skill.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Emit a JSON envelope.")
+def list_skills(as_json):
+    """List active (approved) skills advertised in the ambient brief."""
+    if as_json:
+        output.set_json_mode()
+    ws = Workspace.find()
+    active = scan_active(ws)
+    if as_json:
+        output.emit("skill.list", {"skills": [_skill_to_dict(s) for s in active]})
+        return
+    if not active:
+        click.echo("No active skills yet. Run `mgit skill distill`, then review the drafts.")
+        return
+    for s in active:
+        pending = " (verify pending)" if s.verify_pending else ""
+        click.echo(f"{s.slug}  [{s.scope_level}]{pending} — {s.description}")
+
+
+@skill.command("drafts")
+@click.option("--json", "as_json", is_flag=True, help="Emit a JSON envelope.")
+def drafts(as_json):
+    """List skill drafts awaiting review."""
+    if as_json:
+        output.set_json_mode()
+    ws = Workspace.find()
+    pending = list_drafts(ws)
+    if as_json:
+        output.emit("skill.drafts", {"drafts": [_skill_to_dict(s) for s in pending]})
+        return
+    if not pending:
+        click.echo("No drafts awaiting review.")
+        return
+    for s in pending:
+        verify = " verify:pending" if s.verify_pending else ""
+        upd = f" updates:{s.updates}" if s.updates else ""
+        click.echo(f"{s.slug}  [{s.scope_level}]{verify}{upd} — {s.description}")
+
+
+@skill.command("show")
+@click.argument("slug")
+@click.option("--json", "as_json", is_flag=True, help="Emit a JSON envelope.")
+def show(slug, as_json):
+    """Print a draft's full SKILL.md."""
+    if as_json:
+        output.set_json_mode()
+    from mgit.core import skill as skill_core
+
+    ws = Workspace.find()
+    draft_dir = skill_core._drafts_dir(ws) / slug
+    md_path = draft_dir / skill_core.SKILL_MD
+    if not md_path.is_file():
+        from mgit.utils.errors import SkillNotFoundError
+        raise SkillNotFoundError(f"no skill draft named '{slug}'")
+    text = md_path.read_text(encoding="utf-8")
+    if as_json:
+        output.emit("skill.show", {"slug": slug, "skill_md": text})
+        return
+    click.echo(text)
+
+
+@skill.command("approve")
+@click.argument("slug")
+@click.option("--run-verify", is_flag=True,
+              help="Run the draft's verify_command first; refuse approval if it fails.")
+@click.option("--json", "as_json", is_flag=True, help="Emit a JSON envelope.")
+def approve(slug, run_verify, as_json):
+    """Approve a draft into the active skill set (updates the ambient brief)."""
+    if as_json:
+        output.set_json_mode()
+    ws = Workspace.find()
+    mgr = SkillManager(ws)
+    verify_result = None
+    if run_verify:
+        verify_result = mgr.run_pending_verify(slug)
+        if verify_result is not None and not verify_result[0]:
+            from mgit.utils.errors import MgitError
+            raise MgitError(f"verify_command failed; not approving:\n{verify_result[1][:500]}")
+    dest = mgr.approve(slug)
+    if as_json:
+        output.emit("skill.approve", {
+            "slug": slug,
+            "dest": str(dest),
+            "verified": bool(verify_result and verify_result[0]),
+        })
+        return
+    click.secho(f"approved {slug} -> {dest}", fg="green")
+    if verify_result and verify_result[0]:
+        click.echo("  verify_command passed")
+
+
+@skill.command("reject")
+@click.argument("slug")
+@click.option("--reason", required=True, help="Recorded as a tombstone; never re-proposed.")
+@click.option("--json", "as_json", is_flag=True, help="Emit a JSON envelope.")
+def reject(slug, reason, as_json):
+    """Reject a draft and tombstone it so it is never re-proposed."""
+    if as_json:
+        output.set_json_mode()
+    ws = Workspace.find()
+    SkillManager(ws).reject(slug, reason)
+    if as_json:
+        output.emit("skill.reject", {"slug": slug, "reason": reason})
+        return
+    click.secho(f"rejected {slug}", fg="red")
+
+
+@skill.command("doctor")
+@click.option("--json", "as_json", is_flag=True, help="Emit a JSON envelope.")
+def doctor(as_json):
+    """Health report: active skills, drafts awaiting review, parked backlog."""
+    if as_json:
+        output.set_json_mode()
+    ws = Workspace.find()
+    report = SkillManager(ws).doctor()
+    if as_json:
+        output.emit("skill.doctor", {"report": report})
+        return
+    for line in report:
+        click.echo(line)

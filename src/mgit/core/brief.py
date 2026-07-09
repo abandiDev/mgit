@@ -48,9 +48,16 @@ parallel sessions may be running.
 
 
 def render_feature_brief(ws: Workspace, feature: FeatureInfo) -> str:
-    """Render the ambient brief: header + working-memory brief + agent ritual."""
+    """Render the ambient brief: header + working-memory brief + learned skills + ritual."""
+    from mgit.core import skill  # lazy: skill regenerates briefs, so avoid an import cycle
+
     data = memory.build_brief(ws, feature)
-    return _HEADER + memory.render_brief(data) + _RITUAL.format(name=feature.name)
+    parts = [_HEADER, memory.render_brief(data)]
+    skills_block = skill.render_active_block(ws)
+    if skills_block:
+        parts.append("\n" + skills_block)
+    parts.append(_RITUAL.format(name=feature.name))
+    return "".join(parts)
 
 
 def write_feature_brief(ws: Workspace, feature: FeatureInfo) -> None:

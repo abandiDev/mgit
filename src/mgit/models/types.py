@@ -42,6 +42,31 @@ class MemoryState:
 
 
 @dataclass
+class SkillInfo:
+    """A distilled skill: draft awaiting review, or active in the workspace.
+
+    The full definition lives in SKILL.md; authoritative metadata lives beside
+    it in a skill.toml sidecar. This is the parsed in-memory view of both.
+    """
+
+    slug: str
+    title: str = ""
+    description: str = ""
+    kind: str = ""
+    scope_level: str = "workspace"  # feature | workspace | global
+    status: str = "draft"  # draft | active
+    paths: list[str] = field(default_factory=list)
+    watched_paths: list[str] = field(default_factory=list)
+    verify_command: str | None = None
+    verify_pending: bool = False
+    verified_at: str | None = None
+    updates: str | None = None  # name of an existing skill this amends
+    features: list[str] = field(default_factory=list)  # provenance
+    created_at: str = ""
+    approved_at: str = ""
+
+
+@dataclass
 class CheckpointRepoState:
     """One repo's pinned state inside a checkpoint."""
 

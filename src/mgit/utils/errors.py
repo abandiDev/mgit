@@ -29,6 +29,10 @@ class FeatureExistsError(MgitError):
     """A feature with this name already exists."""
 
 
+class SkillNotFoundError(MgitError):
+    """Referenced skill draft or active skill does not exist."""
+
+
 class GitError(MgitError):
     """A git command failed."""
 

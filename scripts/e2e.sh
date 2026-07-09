@@ -159,6 +159,44 @@ check "mgit commit -f ." "$MGIT" commit -m "payment skeleton" -f .
 json_check "commit events journaled for both repos" \
     "len([e for e in obj['data']['entries'] if e.get('event') == 'commit']) == 2" < "$SANDBOX/log.json"
 
+# ---------- skill distillation ----------
+section "skill: distill -> review -> ambient brief"
+# Fake `claude` returns one structured candidate; the [skills] config points at it.
+cat > "$FAKE_DIR/skill_candidates.json" <<'EOF'
+{"result":"","structured_output":{"candidates":[
+ {"slug":"seed-before-e2e","kind":"durable-convention","scope_level":"workspace","paths":[],
+  "title":"Seed before e2e","trigger_description":"Run ./scripts/seed.sh before the e2e suite",
+  "anti_triggers":["unit tests only"],"steps":["Run ./scripts/seed.sh"],"verify_command":null,
+  "evidence":[{"quote":"tokens live in svc-api only","kind":"decision"}],
+  "explicit_rule":true,"recurrence_of":null,"updates_existing_skill":null,"watched_paths":[]}]}}
+EOF
+cat > "$FAKE_BIN/claude" <<'FAKE'
+#!/bin/bash
+cat "$FAKE_DIR/skill_candidates.json"
+FAKE
+chmod +x "$FAKE_BIN/claude"
+$PY - <<EOF
+import tomllib, tomli_w
+with open(".mgit/config.toml", "rb") as f:
+    data = tomllib.load(f)
+data.setdefault("skills", {})["claude_bin"] = "claude"
+with open(".mgit/config.toml", "wb") as f:
+    tomli_w.dump(data, f)
+EOF
+"$MGIT" skill distill > "$SANDBOX/distill.txt" 2>&1
+check "skill distill drafts a candidate" grep -q "seed-before-e2e: draft" "$SANDBOX/distill.txt"
+"$MGIT" skill drafts > "$SANDBOX/drafts.txt" 2>&1
+check "draft awaiting review" grep -q seed-before-e2e "$SANDBOX/drafts.txt"
+check "skill approve" "$MGIT" skill approve seed-before-e2e
+"$MGIT" skill list --json > "$SANDBOX/skills.json" 2>&1
+json_check "active skill listed" \
+    "len(obj['data']['skills']) == 1 and obj['data']['skills'][0]['status'] == 'active'" < "$SANDBOX/skills.json"
+check "learned-skills block reaches ambient brief" \
+    grep -q "Learned skills (mgit)" .mgit/worktrees/pay-flow/AGENTS.md
+check "approved skill named in ambient brief" \
+    grep -q "seed-before-e2e" .mgit/worktrees/pay-flow/CLAUDE.md
+check "skill doctor runs" "$MGIT" skill doctor
+
 # ---------- checkpoint save/restore ----------
 section "checkpoint: save, wreck, restore"
 WT=.mgit/worktrees/pay-flow/svc-api
