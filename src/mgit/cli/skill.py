@@ -119,6 +119,27 @@ def show(slug, as_json):
     click.echo(text)
 
 
+def _consent_to_run_many(items, assume_yes: bool, quiet: bool = False) -> None:
+    """Consent for a batch of (slug, command, tree) verifications."""
+    if not items:
+        return
+    if not quiet:
+        click.secho("verify_command(s) were written by an LLM from journal text.", fg="yellow")
+        click.echo("  each runs in a throwaway clone; your checkouts are not touched")
+        for slug, command, tree in items:
+            click.echo(f"  {slug}  [{tree}]")
+            click.echo(f"    {command}")
+    if assume_yes:
+        return
+    if not sys.stdin.isatty():
+        raise MgitError(
+            f"{len(items)} LLM-authored verify_command(s) need consent before they run.\n"
+            "Non-interactive session — re-run with --yes to execute them."
+        )
+    if not click.confirm(f"Execute {len(items)} command(s)?", default=False):
+        raise MgitError("Aborted.")
+
+
 def _consent_to_run(command: str, cwd, assume_yes: bool, quiet: bool = False) -> None:
     """Show the model-authored command before it runs as shell in a real repo.
 
@@ -164,26 +185,75 @@ def approve(slug, run_verify, assume_yes, as_json):
         if pending is not None:
             _consent_to_run(pending[0], pending[1], assume_yes, quiet=as_json)
         verify_result = mgr.run_pending_verify(slug)
-        if verify_result is not None and not verify_result[0]:
+        if verify_result is not None and not verify_result.ok:
             raise MgitError(
-                f"verify_command failed in {verify_result[2]}; not approving:\n"
-                f"{verify_result[1][:500]}"
+                f"verify_command failed against {verify_result.tree} "
+                f"({verify_result.ref}); not approving:\n{verify_result.output[:500]}"
             )
     dest = mgr.approve(slug)
     if as_json:
         output.emit("skill.approve", {
             "slug": slug,
             "dest": str(dest),
-            "verified": bool(verify_result and verify_result[0]),
-            "verify_cwd": str(verify_result[2]) if verify_result else None,
+            "verified": bool(verify_result and verify_result.ok),
+            "verify_tree": str(verify_result.tree) if verify_result else None,
+            "verify_ref": verify_result.ref if verify_result else None,
         })
         return
     click.secho(f"approved {slug} -> {dest}", fg="green")
-    if verify_result and verify_result[0]:
+    if verify_result and verify_result.ok:
         # Say what it validated: a repo-relative command that silently ran in
         # the workspace root would sweep every repo and worktree, and could
-        # pass while the intended target fails.
-        click.echo(f"  verify_command passed against {verify_result[2]}")
+        # pass while the intended target fails. A draft verifies the branch it
+        # was learned on, which usually has files main has never seen.
+        click.echo(
+            f"  verify_command passed against {verify_result.tree} @ {verify_result.ref}"
+        )
+
+
+@skill.command("verify")
+@click.argument("slug", required=False)
+@click.option("--yes", "assume_yes", is_flag=True,
+              help="Execute the verify_command(s) without confirming.")
+@click.option("--json", "as_json", is_flag=True, help="Emit a JSON envelope.")
+def verify(slug, assume_yes, as_json):
+    """Re-run active skills' verify_commands against the repo as it is now."""
+    if as_json:
+        output.set_json_mode()
+    ws = Workspace.find()
+    mgr = SkillManager(ws)
+
+    pending = mgr.pending_active_verify(slug)
+    if not pending:
+        if as_json:
+            output.emit("skill.verify", {"results": []})
+            return
+        click.echo("No active skill has a verify_command to run.")
+        return
+    _consent_to_run_many(pending, assume_yes, quiet=as_json)
+
+    results = mgr.verify_active(slug)
+    failed = [s for s, r in results if not r.ok]
+    if as_json:
+        output.emit("skill.verify", {
+            "results": [
+                {"slug": s, "ok": r.ok, "tree": str(r.tree), "ref": r.ref,
+                 "output": r.output[-1000:]}
+                for s, r in results
+            ],
+            "failed": failed,
+        })
+    else:
+        for s, r in results:
+            mark = click.style("ok  ", fg="green") if r.ok else click.style("FAIL", fg="red")
+            click.echo(f"{mark} {s}  ({r.tree} @ {r.ref})")
+            if not r.ok:
+                # A failing command often prints nothing at all (`test -f nope`).
+                tail = r.output.strip().splitlines()
+                click.echo("      " + (tail[-1][:120] if tail else "(no output)"))
+    if failed:
+        # Bulk partial failure, per the agent contract's exit codes.
+        raise SystemExit(1)
 
 
 @skill.command("reject")

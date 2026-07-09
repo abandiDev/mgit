@@ -632,9 +632,64 @@ def runnable_verify(command: str | None) -> str | None:
     return None if _PLACEHOLDER_RE.search(command) else command.strip()
 
 
+def watched_changes(ws: Workspace, meta: dict) -> int:
+    """Commits touching a skill's watched_paths since it was last verified.
+
+    `watched_paths` was recorded on every skill and read by nothing; this is what
+    it is for. A skill whose subject matter moved underneath it is a skill whose
+    verification is stale, even though it once passed.
+    """
+    verified_at = meta.get("verified_at")
+    watched = [str(p) for p in (meta.get("watched_paths") or [])]
+    repo = verify_repo(ws, meta)
+    if not (verified_at and watched and repo):
+        return 0
+    result = git.run_git(
+        "log", "--oneline", f"--since={verified_at}", "--", *watched,
+        cwd=ws.repo_path(repo), check=False,
+    )
+    if result.returncode != 0:
+        return 0
+    return len([line for line in result.stdout.splitlines() if line.strip()])
+
+
+@dataclass
+class VerifyResult:
+    """Outcome of one verify_command run, and what it actually validated."""
+
+    ok: bool
+    output: str
+    tree: Path  # the repo (or workspace root) the command spoke about
+    ref: str = "HEAD"  # the commit-ish checked out in the sandbox
+    sandboxed: bool = True
+
+
+def verify_commit(ws: Workspace, repo_name: str, meta: dict, under_review: bool) -> str:
+    """The commit-ish a verify_command should be checked against.
+
+    Under review (a draft), the lesson's evidence lives on the feature branch it
+    was learned on, and that branch usually carries files `main` has never seen —
+    verifying against `main` fails for reasons that have nothing to do with the
+    skill. Once the skill is active it is a standing claim about the repo as it
+    is now, so it verifies against HEAD.
+    """
+    from mgit.core.feature import sandbox_branch
+    from mgit.core.repo import Repo
+
+    repo = Repo(ws.get_repo(repo_name), ws.root)
+    if under_review:
+        for feature in meta.get("features") or []:
+            branch = sandbox_branch(str(feature))
+            if repo.rev_parse(branch):
+                return branch
+    return "HEAD"
+
+
 @contextlib.contextmanager
-def verify_sandbox(ws: Workspace, repo_name: str, timeout: int) -> Iterator[Path]:
-    """A throwaway clone of `repo_name` at its current HEAD, removed afterwards.
+def verify_sandbox(
+    ws: Workspace, repo_name: str, timeout: int, ref: str = "HEAD"
+) -> Iterator[Path]:
+    """A throwaway clone of `repo_name` at `ref`, removed afterwards.
 
     A clone, not a `git worktree`: linked worktrees share the repository's refs,
     so a `git stash pop` inside one consumes the real stash. A local clone gets
@@ -646,16 +701,16 @@ def verify_sandbox(ws: Workspace, repo_name: str, timeout: int) -> Iterator[Path
     that makes a feature worktree runnable — is run to provide them.
     """
     source = ws.repo_path(repo_name).resolve()
-    head = git.run_git("rev-parse", "HEAD", cwd=source, check=False).stdout.strip()
-    if not head:
-        raise MgitError(f"repo '{repo_name}' has no commits; cannot sandbox a verify")
+    sha = git.run_git("rev-parse", ref, cwd=source, check=False).stdout.strip()
+    if not sha:
+        raise MgitError(f"repo '{repo_name}' has no commit at '{ref}'; cannot sandbox a verify")
 
     tmp = Path(tempfile.mkdtemp(prefix="mgit-verify-"))
     sandbox = tmp / repo_name
     try:
         git.run_git("clone", "--local", "--quiet", "--no-checkout",
                     str(source), str(sandbox))
-        git.run_git("checkout", "--detach", head, cwd=sandbox)
+        git.run_git("checkout", "--detach", sha, cwd=sandbox)
         setup = ws.get_repo(repo_name).setup
         if setup:
             subprocess.run(  # noqa: S602 - user-authored, same hook as materialize
@@ -668,21 +723,26 @@ def verify_sandbox(ws: Workspace, repo_name: str, timeout: int) -> Iterator[Path
 
 
 def run_verify_for(
-    ws: Workspace, command: str, meta: dict, cfg: SkillConfig
-) -> tuple[bool, str, Path]:
+    ws: Workspace,
+    command: str,
+    meta: dict,
+    cfg: SkillConfig,
+    under_review: bool = False,
+) -> VerifyResult:
     """Run a verify_command against the tree it belongs to, in isolation.
 
-    Returns (ok, output, validated_tree). The command is LLM-authored shell, so
-    it never touches that tree directly — it runs in a disposable clone of it.
+    The command is LLM-authored shell, so it never touches that tree directly —
+    it runs in a disposable clone of it.
     """
     repo = verify_repo(ws, meta)
     if repo is None:
         # No single repo to clone; a repo-agnostic command runs at the root.
         ok, output = run_verify(command, ws.root, cfg.verify_timeout)
-        return ok, output, ws.root
-    with verify_sandbox(ws, repo, cfg.verify_timeout) as sandbox:
+        return VerifyResult(ok, output, ws.root, ref="-", sandboxed=False)
+    ref = verify_commit(ws, repo, meta, under_review)
+    with verify_sandbox(ws, repo, cfg.verify_timeout, ref) as sandbox:
         ok, output = run_verify(command, sandbox, cfg.verify_timeout)
-    return ok, output, ws.repo_path(repo)
+    return VerifyResult(ok, output, ws.repo_path(repo), ref=ref)
 
 
 def run_verify(command: str, cwd: Path, timeout: int) -> tuple[bool, str]:
@@ -744,12 +804,16 @@ def route_candidate(
 
     verified = False
     if verify_cmd and cfg.allow_auto_verify:
-        ok, output, _tree = run_verify_for(
-            ws, verify_cmd, {"repos": _repos_of(ws, scope_features)}, cfg
+        result = run_verify_for(
+            ws,
+            verify_cmd,
+            {"repos": _repos_of(ws, scope_features), "features": scope_features},
+            cfg,
+            under_review=True,
         )
-        if not ok:
-            candidate["verify_failure"] = output
-            return "park", f"verify_command failed: {output[:200]}"
+        if not result.ok:
+            candidate["verify_failure"] = result.output
+            return "park", f"verify_command failed: {result.output[:200]}"
         verified = True
 
     draft_dir = render_draft(ws, candidate, features=scope_features)
@@ -965,17 +1029,56 @@ class SkillManager:
         return str(command), verify_cwd(ws, meta)
 
     # -- run a draft's pending verify with the human present --
-    def run_pending_verify(self, slug: str) -> tuple[bool, str, Path] | None:
+    def run_pending_verify(self, slug: str) -> VerifyResult | None:
         ws, cfg = self.ws, self.cfg
         draft_dir = _drafts_dir(ws) / slug
         meta = read_meta(draft_dir)
         command = meta.get("verify_command")
         if not command or not meta.get("verify_pending"):
             return None
-        ok, output, tree = run_verify_for(ws, str(command), meta, cfg)
-        if ok:
+        # A draft is under review: verify the branch the lesson was learned on.
+        result = run_verify_for(ws, str(command), meta, cfg, under_review=True)
+        if result.ok:
             update_meta(draft_dir, verify_pending=False, verified_at=memory.utc_now())
-        return ok, output, tree
+        return result
+
+    # -- re-run an ACTIVE skill's verify against the repo as it is now --
+    def verify_active(self, slug: str | None = None) -> list[tuple[str, VerifyResult]]:
+        """Re-verify approved skills. An active skill is a standing claim about
+        the repo, so it is checked against HEAD, not against the branch it was
+        learned on."""
+        ws, cfg = self.ws, self.cfg
+        skills = scan_active(ws)
+        if slug is not None:
+            skills = [s for s in skills if s.slug == slug]
+            if not skills:
+                raise SkillNotFoundError(f"no active skill named '{slug}'")
+
+        results: list[tuple[str, VerifyResult]] = []
+        for s in skills:
+            if not s.verify_command:
+                continue
+            skill_dir = _active_dir(ws) / s.slug
+            meta = read_meta(skill_dir)
+            result = run_verify_for(ws, s.verify_command, meta, cfg, under_review=False)
+            if result.ok:
+                update_meta(skill_dir, verify_pending=False, verified_at=memory.utc_now())
+            _ledger_append(ws, {"type": "verify", "slug": s.slug, "ok": result.ok})
+            results.append((s.slug, result))
+        return results
+
+    def pending_active_verify(self, slug: str | None = None) -> list[tuple[str, str, Path]]:
+        """(slug, command, tree) for each active skill `verify_active` would run."""
+        ws = self.ws
+        out = []
+        for s in scan_active(ws):
+            if slug is not None and s.slug != slug:
+                continue
+            if not s.verify_command:
+                continue
+            meta = read_meta(_active_dir(ws) / s.slug)
+            out.append((s.slug, s.verify_command, verify_cwd(ws, meta)))
+        return out
 
     # -- doctor --
     def doctor(self) -> list[str]:
@@ -987,8 +1090,15 @@ class SkillManager:
         lines.append(f"active skills: {len(active)}")
         for s in active:
             if s.verify_pending:
-                remedy = f" — run: {s.verify_command}" if s.verify_command else ""
+                remedy = f" — run: mgit skill verify {s.slug}" if s.verify_command else ""
                 lines.append(f"  {s.slug}: approved but verify never ran{remedy}")
+                continue
+            changed = watched_changes(ws, read_meta(_active_dir(ws) / s.slug))
+            if changed:
+                lines.append(
+                    f"  {s.slug}: {changed} commit(s) touched its watched paths since "
+                    f"it was verified — run: mgit skill verify {s.slug}"
+                )
         lines.append(f"drafts awaiting review: {len(drafts)}")
         for d in drafts:
             lines.append(f"  {d.slug} ({d.scope_level})")

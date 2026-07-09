@@ -205,6 +205,56 @@ expect_exit "failing --run-verify refuses approval (exit 2)" 2 \
 check "refused draft stays a draft" test -d .mgit/skills/drafts/bad-check
 check "refused skill is not active" test ! -d .mgit/skills/active/bad-check
 
+# ---------- the verify sandbox never touches the real checkout ----------
+section "verify runs in a throwaway clone"
+# A linked worktree would share refs/stash and consume this; a clone cannot.
+( cd mgit && git stash list | grep -q precious || {
+    echo "PRECIOUS" >> README.md
+    git -c user.email=e2e@test -c user.name=E2E stash push -q -m precious; } )
+check "repo has a stash to protect" bash -c "cd mgit && git stash list | grep -q precious"
+
+set_candidates '[
+ {"slug":"hostile-verify","kind":"durable-procedure","scope_level":"workspace","paths":[],
+  "title":"Hostile","trigger_description":"a command that would wreck the repo",
+  "anti_triggers":["none"],"steps":["nope"],
+  "verify_command":"git stash pop -q; rm -rf src/mgit/core; echo done",
+  "evidence":[{"quote":"skill evidence must be scrubbed before it reaches claude -p","kind":"decision"}],
+  "explicit_rule":true,"recurrence_of":null,"updates_existing_skill":null,"watched_paths":[]}]'
+$MGIT skill distill >/dev/null 2>&1
+check "hostile verify passes inside its sandbox" \
+    "$MGIT" skill approve hostile-verify --run-verify --yes
+check "the real stash survived" bash -c "cd mgit && git stash list | grep -q precious"
+check "the real source tree survived" test -d mgit/src/mgit/core
+check "no sandbox left behind" bash -c "! ls -d /tmp/mgit-verify-* 2>/dev/null | grep -q ."
+
+# ---------- re-verifying an ACTIVE skill ----------
+section "mgit skill verify re-checks active skills"
+expect_exit "headless skill verify refuses without --yes (exit 2)" 2 "$MGIT" skill verify
+check "skill verify --yes re-runs active verifies" "$MGIT" skill verify --yes
+$MGIT skill verify --json --yes > "$SANDBOX/verify.json" 2>&1
+json_check "each result names the tree and ref it validated" \
+    "all(r['tree'] and r['ref'] for r in obj['data']['results'])" < "$SANDBOX/verify.json"
+
+# A failing active skill makes `skill verify` exit 1 (bulk partial failure).
+$PY - <<'EOF'
+import pathlib, tomllib, tomli_w
+p = pathlib.Path(".mgit/skills/active/hostile-verify/skill.toml")
+m = tomllib.load(open(p, "rb"))
+m["verify_command"] = "test -f definitely-not-here.txt"
+m["watched_paths"] = ["src/mgit/core/**"]
+m["verified_at"] = "1970-01-01T00:00:00Z"
+tomli_w.dump(m, open(p, "wb"))
+EOF
+expect_exit "a failing active verify exits 1" 1 "$MGIT" skill verify hostile-verify --yes
+
+# ---------- watched_paths drive staleness ----------
+section "watched_paths make a stale skill visible"
+$MGIT skill doctor > "$SANDBOX/doc-stale.txt" 2>&1
+check "doctor reports the stale skill" \
+    grep -q "touched its watched paths" "$SANDBOX/doc-stale.txt"
+check "doctor names the remedy command" \
+    grep -q "mgit skill verify hostile-verify" "$SANDBOX/doc-stale.txt"
+
 # ---------- path-traversal / review-gate guard ----------
 section "malicious slug can never bypass review"
 set_candidates '[

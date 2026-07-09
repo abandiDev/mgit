@@ -457,9 +457,9 @@ class TestVerifyRunsInTheRepo:
         )
         skill.update_meta(ws.skills_dir / "drafts" / "cwd-rule", verify_pending=True)
 
-        ok, _output, cwd = SkillManager(ws).run_pending_verify("cwd-rule")
-        assert ok, "verify must run inside repo-a, where the marker lives"
-        assert cwd == ws.repo_path("repo-a")
+        result = SkillManager(ws).run_pending_verify("cwd-rule")
+        assert result.ok, "verify must run against repo-a, where the marker lives"
+        assert result.tree == ws.repo_path("repo-a")
 
 
 class TestVerifyCommandNeedsConsent:
@@ -717,11 +717,11 @@ class TestVerifySandboxIsolatesGitState:
             ["git", "stash", "list"], cwd=repo, capture_output=True, text=True
         ).stdout
 
-        ok, _out, tree = run_verify_for(
+        result = run_verify_for(
             ws, "git stash pop -q || true", {"repos": ["repo-a"]}, SkillConfig()
         )
-        assert ok
-        assert tree == repo, "it reports the tree it validated"
+        assert result.ok
+        assert result.tree == repo, "it reports the tree it validated"
 
         after = subprocess.run(
             ["git", "stash", "list"], cwd=repo, capture_output=True, text=True
@@ -736,10 +736,10 @@ class TestVerifySandboxIsolatesGitState:
         repo = ws.repo_path("repo-a")
         assert (repo / "README.md").exists()
 
-        ok, _out, _tree = run_verify_for(
+        result = run_verify_for(
             ws, "rm -rf README.md && git checkout --orphan wiped", {"repos": ["repo-a"]}, SkillConfig()
         )
-        assert ok
+        assert result.ok
         assert (repo / "README.md").exists(), "the file survived; the command hit a clone"
         branch = subprocess.run(
             ["git", "branch", "--show-current"], cwd=repo, capture_output=True, text=True
@@ -750,18 +750,16 @@ class TestVerifySandboxIsolatesGitState:
         from mgit.core.skill import SkillConfig, run_verify_for
 
         ws = initialized_workspace
-        ok, _out, _tree = run_verify_for(
-            ws, "test -f README.md", {"repos": ["repo-a"]}, SkillConfig()
-        )
-        assert ok, "committed content is present in the sandbox"
+        result = run_verify_for(ws, "test -f README.md", {"repos": ["repo-a"]}, SkillConfig())
+        assert result.ok, "committed content is present in the sandbox"
 
     def test_the_sandbox_is_removed_afterwards(self, initialized_workspace):
         from mgit.core.skill import SkillConfig, run_verify_for
 
         ws = initialized_workspace
-        ok, out, _tree = run_verify_for(ws, "pwd", {"repos": ["repo-a"]}, SkillConfig())
-        assert ok
-        sandbox = out.strip().splitlines()[-1]
+        result = run_verify_for(ws, "pwd", {"repos": ["repo-a"]}, SkillConfig())
+        assert result.ok
+        sandbox = result.output.strip().splitlines()[-1]
         assert not Path(sandbox).exists(), f"sandbox {sandbox} outlived the verify"
 
     def test_the_repo_setup_hook_provisions_the_sandbox(self, initialized_workspace):
@@ -773,8 +771,231 @@ class TestVerifySandboxIsolatesGitState:
         info.setup = "mkdir -p node_modules && touch node_modules/.installed"
         ws.save()
 
-        ok, _out, _tree = run_verify_for(
+        result = run_verify_for(
             ws, "test -f node_modules/.installed", {"repos": ["repo-a"]}, SkillConfig()
         )
-        assert ok, "the repo's setup hook ran inside the sandbox"
+        assert result.ok, "the repo's setup hook ran inside the sandbox"
         assert not (ws.repo_path("repo-a") / "node_modules").exists()
+
+
+class TestVerifyValidatesTheRightTree:
+    """A draft's evidence lives on the branch the lesson was learned on, and that
+    branch usually carries files `main` has never seen. Verifying a draft against
+    `main` fails for reasons that have nothing to do with the skill. An ACTIVE
+    skill is a standing claim about the repo now, so it verifies against HEAD."""
+
+    def _feature_with_a_new_file(self, ws, feature="feat", repo="repo-a"):
+        from mgit.core.feature import FeatureManager
+
+        fm = FeatureManager(ws)
+        fm.start(feature, [repo])
+        wt = fm.materialize(feature, repo)
+        (wt / "only-on-branch.txt").write_text("x")
+        subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+        subprocess.run(["git", "commit", "-qm", "branch-only file"], cwd=wt, check=True)
+        return fm
+
+    def test_a_draft_verifies_the_branch_it_was_learned_on(self, initialized_workspace):
+        from mgit.core.skill import SkillConfig, run_verify_for
+
+        ws = initialized_workspace
+        self._feature_with_a_new_file(ws)
+        meta = {"repos": ["repo-a"], "features": ["feat"]}
+
+        under_review = run_verify_for(
+            ws, "test -f only-on-branch.txt", meta, SkillConfig(), under_review=True
+        )
+        assert under_review.ok, "the draft's own branch has the file"
+        assert under_review.ref == "mgit/feat"
+
+    def test_an_active_skill_verifies_head(self, initialized_workspace):
+        from mgit.core.skill import SkillConfig, run_verify_for
+
+        ws = initialized_workspace
+        self._feature_with_a_new_file(ws)
+        meta = {"repos": ["repo-a"], "features": ["feat"]}
+
+        active = run_verify_for(
+            ws, "test -f only-on-branch.txt", meta, SkillConfig(), under_review=False
+        )
+        assert not active.ok, "the file is not merged into HEAD yet"
+        assert active.ref == "HEAD"
+
+    def test_falls_back_to_head_when_the_feature_is_gone(self, initialized_workspace):
+        from mgit.core.skill import SkillConfig, run_verify_for
+
+        ws = initialized_workspace
+        fm = self._feature_with_a_new_file(ws)
+        fm.delete("feat", force=True)  # branch deleted with the feature
+
+        result = run_verify_for(
+            ws, "test -f README.md", {"repos": ["repo-a"], "features": ["feat"]},
+            SkillConfig(), under_review=True,
+        )
+        assert result.ok
+        assert result.ref == "HEAD", "no branch left to verify against"
+
+
+class TestSkillVerifyCommand:
+    """There was no way to re-run an active skill's verify_command: `approve`
+    resolves its slug against the drafts directory only."""
+
+    def _active_skill(self, ws, command, watched=None):
+        from mgit.core import skill
+        from mgit.core.feature import FeatureManager
+
+        FeatureManager(ws).start("feat", ["repo-a"])
+        skill.render_draft(
+            ws,
+            {
+                "slug": "checkable",
+                "kind": "durable-procedure",
+                "scope_level": "feature",
+                "trigger_description": "t",
+                "anti_triggers": ["never"],
+                "steps": ["s"],
+                "verify_command": command,
+                "watched_paths": watched or [],
+                "evidence": [{"quote": "q", "kind": "decision"}],
+            },
+            features=["feat"],
+        )
+        return SkillManager(ws).approve("checkable")
+
+    def test_verify_active_reruns_and_stamps(self, initialized_workspace):
+        ws = initialized_workspace
+        dest = self._active_skill(ws, "test -f README.md")
+        skill.update_meta(dest, verify_pending=True)
+
+        results = SkillManager(ws).verify_active()
+        assert [(s, r.ok) for s, r in results] == [("checkable", True)]
+        meta = skill.read_meta(dest)
+        assert meta["verify_pending"] is False
+        assert meta["verified_at"]
+
+    def test_verify_active_reports_failure_without_activating_anything(self, initialized_workspace):
+        ws = initialized_workspace
+        self._active_skill(ws, "test -f nope.txt")
+        results = SkillManager(ws).verify_active()
+        assert [(s, r.ok) for s, r in results] == [("checkable", False)]
+
+    def test_verify_active_rejects_an_unknown_slug(self, initialized_workspace):
+        ws = initialized_workspace
+        self._active_skill(ws, "true")
+        with pytest.raises(SkillNotFoundError):
+            SkillManager(ws).verify_active("no-such-skill")
+
+    def test_cli_verify_needs_consent_and_does_not_run(self, initialized_workspace, monkeypatch):
+        from click.testing import CliRunner
+
+        from mgit.cli import main
+
+        ws = initialized_workspace
+        marker = ws.root / "verify-ran.txt"
+        self._active_skill(ws, f"touch {marker}")
+        monkeypatch.chdir(ws.root)
+
+        result = CliRunner().invoke(main, ["skill", "verify"])
+        assert result.exit_code != 0
+        assert not marker.exists()
+
+    def test_cli_verify_with_yes_runs_and_exits_1_on_failure(
+        self, initialized_workspace, monkeypatch
+    ):
+        from click.testing import CliRunner
+
+        from mgit.cli import main
+
+        ws = initialized_workspace
+        self._active_skill(ws, "test -f nope.txt")
+        monkeypatch.chdir(ws.root)
+
+        result = CliRunner().invoke(main, ["skill", "verify", "--yes"])
+        assert result.exit_code == 1, result.output  # bulk partial failure
+
+
+class TestWatchedPathsDriveStaleness:
+    """`watched_paths` was written to every skill.toml and read by nothing."""
+
+    def test_no_change_means_not_stale(self, initialized_workspace):
+        from mgit.core.skill import watched_changes
+
+        ws = initialized_workspace
+        meta = {"repos": ["repo-a"], "verified_at": "2099-01-01T00:00:00Z",
+                "watched_paths": ["README.md"]}
+        assert watched_changes(ws, meta) == 0
+
+    def test_a_commit_touching_a_watched_path_makes_it_stale(self, initialized_workspace):
+        from mgit.core.skill import watched_changes
+
+        ws = initialized_workspace
+        # repo-a's fixture commit touched README.md, and 1970 predates it
+        meta = {"repos": ["repo-a"], "verified_at": "1970-01-01T00:00:00Z",
+                "watched_paths": ["README.md"]}
+        assert watched_changes(ws, meta) >= 1
+
+    def test_a_commit_elsewhere_does_not(self, initialized_workspace):
+        from mgit.core.skill import watched_changes
+
+        ws = initialized_workspace
+        meta = {"repos": ["repo-a"], "verified_at": "1970-01-01T00:00:00Z",
+                "watched_paths": ["src/never-touched/**"]}
+        assert watched_changes(ws, meta) == 0
+
+    def test_missing_verified_at_or_paths_is_never_stale(self, initialized_workspace):
+        from mgit.core.skill import watched_changes
+
+        ws = initialized_workspace
+        assert watched_changes(ws, {"repos": ["repo-a"], "watched_paths": ["README.md"]}) == 0
+        assert watched_changes(ws, {"repos": ["repo-a"], "verified_at": "1970-01-01T00:00:00Z"}) == 0
+
+    def test_doctor_surfaces_staleness_and_names_the_fix(self, initialized_workspace):
+        from mgit.core import skill
+        from mgit.core.feature import FeatureManager
+
+        ws = initialized_workspace
+        FeatureManager(ws).start("feat", ["repo-a"])
+        dest = skill.render_draft(
+            ws,
+            {
+                "slug": "watchful", "kind": "durable-procedure", "scope_level": "feature",
+                "trigger_description": "t", "anti_triggers": ["never"], "steps": ["s"],
+                "verify_command": "true", "watched_paths": ["README.md"],
+                "evidence": [{"quote": "q", "kind": "decision"}],
+            },
+            features=["feat"],
+        )
+        skill.update_meta(dest, verify_pending=False, verified_at="1970-01-01T00:00:00Z")
+        SkillManager(ws).approve("watchful")
+
+        report = "\n".join(SkillManager(ws).doctor())
+        assert "touched its watched paths" in report
+        assert "mgit skill verify watchful" in report
+
+
+def test_cli_verify_failure_with_no_output_still_exits_1(initialized_workspace, monkeypatch):
+    """`test -f nope` prints nothing; formatting its "last line" was an IndexError
+    that surfaced as exit 4 (internal error) instead of 1 (partial failure)."""
+    from click.testing import CliRunner
+
+    from mgit.cli import main
+    from mgit.core.feature import FeatureManager
+
+    ws = initialized_workspace
+    FeatureManager(ws).start("feat", ["repo-a"])
+    skill.render_draft(
+        ws,
+        {
+            "slug": "silent-fail", "kind": "durable-procedure", "scope_level": "feature",
+            "trigger_description": "t", "anti_triggers": ["never"], "steps": ["s"],
+            "verify_command": "test -f definitely-not-here.txt",
+            "evidence": [{"quote": "q", "kind": "decision"}],
+        },
+        features=["feat"],
+    )
+    SkillManager(ws).approve("silent-fail")
+    monkeypatch.chdir(ws.root)
+
+    result = CliRunner().invoke(main, ["skill", "verify", "--yes"])
+    assert result.exit_code == 1, result.output
+    assert "no output" in result.output

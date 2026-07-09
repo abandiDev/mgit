@@ -249,6 +249,24 @@ the clone first, so dependencies are present. A failing command refuses approval
 and leaves the draft alone. Opt into `allow-auto-verify` only if you accept
 unattended execution.
 
+**Which tree gets verified depends on when.** A *draft* is under review, so it is
+checked against the sandbox branch of the feature it was learned on — that branch
+usually carries files `main` has never seen, and verifying against `main` would
+fail for reasons that have nothing to do with the skill. An *active* skill is a
+standing claim about the repo as it is now, so `mgit skill verify` checks it
+against `HEAD`.
+
+```bash
+mgit skill verify                 # re-run every active skill's verify_command
+mgit skill verify <slug> --yes    # one skill, no prompt (exit 1 if it fails)
+mgit skill doctor                 # names any skill whose watched paths moved
+```
+
+A skill's `watched_paths` are the globs whose change should prompt
+re-verification. `mgit skill doctor` counts commits touching them since the skill
+was last verified and tells you which skills to re-check: passing once is not the
+same as still being true.
+
 ## Agent workflow
 
 mgit is built agent-first. Four layers, from ambient to programmatic:
@@ -362,7 +380,8 @@ mgit push -f .
 | `mgit skill approve <slug> [--run-verify] [--yes] [--json]` | Promote a draft into the active set; `--run-verify` refuses approval if its `verify_command` fails. The command is LLM-authored shell, so it is shown and confirmed first — `--yes` to skip the prompt |
 | `mgit skill reject <slug> --reason TEXT [--json]` | Tombstone a draft so it is never re-proposed |
 | `mgit skill list [--json]` | List active skills advertised in the ambient brief |
-| `mgit skill doctor [--json]` | Health report: active skills, drafts, parked backlog |
+| `mgit skill verify [<slug>] [--yes] [--json]` | Re-run active skills' `verify_command`s against the repo as it is now; exits `1` if any fails |
+| `mgit skill doctor [--json]` | Health report: active skills, drafts, parked backlog, skills whose watched paths moved |
 
 ### Bulk operations
 
