@@ -246,3 +246,61 @@ class TestFork:
         fm = FeatureManager(initialized_workspace)
         with pytest.raises(MgitError):
             fm.fork("child", "no-such-parent")
+
+
+class TestPlanDoneAndResolveAreRepeatable:
+    """`--done 1 --done 2` silently dropped the first index (click keeps the
+    last value for non-multiple options), so one step vanished and the other
+    survived. Found by two parallel feature sessions closing out their plans."""
+
+    def _plan(self, ws, *args):
+        from click.testing import CliRunner
+
+        from mgit.cli import main
+
+        return CliRunner().invoke(main, ["feature", "plan", *args])
+
+    def _setup(self, ws, monkeypatch):
+        monkeypatch.chdir(ws.root)
+        FeatureManager(ws).start("feat", ["repo-a"])
+
+    def test_multiple_done_removes_all_named_steps(self, initialized_workspace, monkeypatch):
+        ws = initialized_workspace
+        self._setup(ws, monkeypatch)
+        self._plan(ws, "--add-next", "A", "--add-next", "B", "--add-next", "C")
+
+        result = self._plan(ws, "--done", "1", "--done", "2")
+        assert result.exit_code == 0, result.output
+        # indices address the list the user saw: A and B go, C remains
+        assert memory.load_state(ws, "feat").next_steps == ["C"]
+
+    def test_done_indices_are_not_shifted_by_earlier_removals(
+        self, initialized_workspace, monkeypatch
+    ):
+        ws = initialized_workspace
+        self._setup(ws, monkeypatch)
+        self._plan(ws, "--add-next", "A", "--add-next", "B", "--add-next", "C")
+
+        # popping 1 first would shift C into slot 2 and delete the wrong step
+        self._plan(ws, "--done", "1", "--done", "3")
+        assert memory.load_state(ws, "feat").next_steps == ["B"]
+
+    def test_out_of_range_done_rejects_before_mutating(
+        self, initialized_workspace, monkeypatch
+    ):
+        ws = initialized_workspace
+        self._setup(ws, monkeypatch)
+        self._plan(ws, "--add-next", "A", "--add-next", "B")
+
+        result = self._plan(ws, "--done", "1", "--done", "9")
+        assert result.exit_code != 0
+        assert memory.load_state(ws, "feat").next_steps == ["A", "B"]  # nothing lost
+
+    def test_multiple_resolve_removes_all_named_questions(
+        self, initialized_workspace, monkeypatch
+    ):
+        ws = initialized_workspace
+        self._setup(ws, monkeypatch)
+        self._plan(ws, "--ask", "q1", "--ask", "q2", "--ask", "q3")
+        self._plan(ws, "--resolve", "1", "--resolve", "3")
+        assert memory.load_state(ws, "feat").open_questions == ["q2"]

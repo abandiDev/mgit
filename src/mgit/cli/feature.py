@@ -497,6 +497,20 @@ def note(text, note_type, feature_name):
     click.echo(f"Noted ({note_type}) in '{name}'.")
 
 
+def _pop_indices(items, indices, flag, kind):
+    """Remove 1-based `indices` from `items`, returning the removed texts.
+
+    Indices address the list as the user saw it, so they are validated up front
+    (nothing is mutated if any is bad) and applied highest-first — popping 1
+    before 2 would shift the list and silently take the wrong element.
+    """
+    unique = sorted(set(indices), reverse=True)
+    for n in unique:
+        if not 1 <= n <= len(items):
+            raise MgitError(f"{flag} {n}: no such {kind} (1..{len(items)})")
+    return [items.pop(n - 1) for n in unique]
+
+
 @feature.command("plan")
 @click.option("--goal", default=None, help="Set the feature goal.")
 @click.option("--status", default=None, help="Set the one-line status.")
@@ -504,15 +518,15 @@ def note(text, note_type, feature_name):
               help="Replace next steps (repeatable).")
 @click.option("--add-next", "add_next", multiple=True,
               help="Append next steps (repeatable).")
-@click.option("--done", "done_n", type=int, default=None,
-              help="Mark next-step N (1-based) as done and remove it.")
+@click.option("--done", "done_ns", type=int, multiple=True,
+              help="Mark next-step N (1-based) as done and remove it (repeatable).")
 @click.option("--ask", "asks", multiple=True, help="Add an open question (repeatable).")
-@click.option("--resolve", "resolve_n", type=int, default=None,
-              help="Resolve open question N (1-based) and remove it.")
+@click.option("--resolve", "resolve_ns", type=int, multiple=True,
+              help="Resolve open question N (1-based) and remove it (repeatable).")
 @click.option("--feature", "-f", "feature_name", default=None,
               help="Feature name (default: active).")
 @click.option("--json", "as_json", is_flag=True, help="Emit a JSON envelope.")
-def plan(goal, status, next_steps, add_next, done_n, asks, resolve_n,
+def plan(goal, status, next_steps, add_next, done_ns, asks, resolve_ns,
          feature_name, as_json):
     """Read or update the structured plan (goal, status, next steps, questions).
 
@@ -540,28 +554,22 @@ def plan(goal, status, next_steps, add_next, done_n, asks, resolve_n,
     if add_next:
         state.next_steps.extend(add_next)
         changed.append("next_steps")
-    if done_n is not None:
-        if not 1 <= done_n <= len(state.next_steps):
-            raise MgitError(
-                f"--done {done_n}: no such next-step (1..{len(state.next_steps)})"
+    if done_ns:
+        for done_text in _pop_indices(state.next_steps, done_ns, "--done", "next-step"):
+            memory.append_event(
+                ws, name, f"Done: {done_text}", event="step_done", actor="agent",
             )
-        done_text = state.next_steps.pop(done_n - 1)
-        memory.append_event(
-            ws, name, f"Done: {done_text}", event="step_done", actor="agent",
-        )
         changed.append("next_steps")
     if asks:
         state.open_questions.extend(asks)
         changed.append("open_questions")
-    if resolve_n is not None:
-        if not 1 <= resolve_n <= len(state.open_questions):
-            raise MgitError(
-                f"--resolve {resolve_n}: no such question (1..{len(state.open_questions)})"
+    if resolve_ns:
+        for resolved in _pop_indices(
+            state.open_questions, resolve_ns, "--resolve", "question"
+        ):
+            memory.append_event(
+                ws, name, f"Resolved: {resolved}", event="question_resolved", actor="agent",
             )
-        resolved = state.open_questions.pop(resolve_n - 1)
-        memory.append_event(
-            ws, name, f"Resolved: {resolved}", event="question_resolved", actor="agent",
-        )
         changed.append("open_questions")
 
     if changed:
