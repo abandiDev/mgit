@@ -290,7 +290,7 @@ mgit push -f .
 
 | Command | Description |
 |---|---|
-| `mgit init [NAME]` | Initialize a workspace (scans for repos, generates AGENT.md/AGENTS.md) |
+| `mgit init [NAME]` | Initialize a workspace in the current directory (scans for repos, installs mgit's block in AGENT.md/AGENTS.md). `NAME` creates a new directory first, like `git init <dir>` |
 | `mgit upgrade [--fix]` | Refresh generated files + health-check for legacy artifacts; `--fix` applies the safe repairs |
 | `mgit remove [--force]` | Remove mgit metadata (.mgit/, AGENT.md, AGENTS.md), keeps repos |
 | `mgit context [--pretty] [-f <name\|.>]` | Workspace state as JSON; `-f` for a deep single-feature read |
