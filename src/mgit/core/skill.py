@@ -382,8 +382,9 @@ PROMPT_TEMPLATE = """You are mgit's skill distiller. Below are steering signals 
 
 - kind: durable-procedure (a multi-step workflow worth re-teaching), durable-convention (a standing rule of this workspace/repo), one-off (specific to one task — most entries are this), personal-preference (how this developer likes to work).
 - scope_level: "feature" if every piece of evidence touches one area/repo — set paths to the narrowest glob(s). "workspace" if the lesson is repo-wide or spans unrelated areas. "global" if it is a tool/framework lesson that would hold in a different workspace.
-- Abstract varying values into {{placeholders}} ONLY where the evidence shows the value varying; never abstract by guess.
-- steps must be concrete enough to execute; anything mechanizable (a command sequence) should also produce verify_command — a single shell command that exits 0 iff the procedure worked.
+- Abstract varying values into {{placeholders}} ONLY where the evidence shows the value varying; never abstract by guess. This applies to `steps`, NEVER to `verify_command`.
+- steps must be concrete enough to execute; anything mechanizable (a command sequence) should also produce verify_command — a single shell command that exits 0 iff the procedure worked. It must be runnable AS WRITTEN from the repo root: no {{placeholders}}, no `cd` into an unknown directory. If you cannot write a concrete command, set verify_command to null.
+- verify_command must be READ-ONLY. Never write, stash, reset, checkout, or otherwise mutate the repo — it is executed against the user's real checkout.
 - evidence quotes must be VERBATIM from the entries above. No paraphrase.
 - anti_triggers are mandatory: when would applying this skill be wrong?
 
@@ -583,6 +584,25 @@ def render_draft(ws: Workspace, candidate: dict, features: list[str]) -> Path:
 
 # --- verify -----------------------------------------------------------------
 
+# `{project-root}`, `{test_file}` — an unsubstituted placeholder the model
+# carried over from `steps`. Requires an interior `-` or `_` so real shell
+# (`${VAR}`, `awk '{print}'`, `{1..3}`) is not mistaken for one.
+_PLACEHOLDER_RE = re.compile(r"(?<!\$)\{[a-zA-Z][a-zA-Z0-9]*(?:[-_][a-zA-Z0-9]+)+\}")
+
+
+def runnable_verify(command: str | None) -> str | None:
+    """The command mgit could actually execute, or None.
+
+    A verify_command exists to prove a lesson mechanically, and its presence is
+    enough to draft a candidate past the n=2 rule. `cd {project-root} && npx
+    vitest run {test-file-path}` can never exit 0, so it proves nothing and must
+    not buy that exemption.
+    """
+    if not command or not command.strip():
+        return None
+    return None if _PLACEHOLDER_RE.search(command) else command.strip()
+
+
 def run_verify(command: str, cwd: Path, timeout: int) -> tuple[bool, str]:
     try:
         proc = subprocess.run(
@@ -617,7 +637,10 @@ def route_candidate(
     recurrence = candidate.get("recurrence_of")
     is_recurrence = bool(recurrence and recurrence in parked_ids) or slug in parked_ids
 
-    verify_cmd = candidate.get("verify_command")
+    # A placeholder command is not a verification. Drop it so nothing downstream
+    # tries to run `cd {project-root}`, and so it cannot buy a draft below.
+    verify_cmd = runnable_verify(candidate.get("verify_command"))
+    candidate["verify_command"] = verify_cmd
     should_draft = (
         bool(candidate.get("updates_existing_skill"))
         or is_recurrence

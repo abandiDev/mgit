@@ -522,3 +522,65 @@ class TestVerifyCommandNeedsConsent:
         assert result.exit_code == 0, result.output
         assert marker.exists(), "with --yes the command runs, in the repo"
         assert (ws.skills_dir / "active" / "risky").is_dir()
+
+
+class TestPlaceholderVerifyDoesNotBuyADraft:
+    """A verify_command's presence exempts a candidate from the n=2 rule.
+
+    A live distiller run emitted `cd {project-root} && npx vitest run
+    {test-file-path}` for a first-occurrence prose observation. That command can
+    never exit 0, so it proves nothing — yet it drafted the candidate.
+    """
+
+    def test_placeholder_commands_are_not_runnable(self):
+        from mgit.core.skill import runnable_verify
+
+        assert runnable_verify("cd {project-root} && npx vitest run {test-file-path}") is None
+        assert runnable_verify("npx vitest run {test_file}") is None
+        assert runnable_verify(None) is None
+        assert runnable_verify("   ") is None
+
+    def test_real_shell_is_not_mistaken_for_a_placeholder(self):
+        from mgit.core.skill import runnable_verify
+
+        for cmd in [
+            "npx tsc --noEmit && npx eslint",
+            "echo ${HOME}",
+            "awk '{print $1}' file",
+            "printf '%s\\n' {1..3}",
+            "grep -qE 'Test Files.*\\(1\\)'",
+        ]:
+            assert runnable_verify(cmd) == cmd.strip(), cmd
+
+    def _candidate(self, **over):
+        c = {
+            "slug": "prose-lesson",
+            "kind": "durable-convention",
+            "scope_level": "global",
+            "trigger_description": "t",
+            "anti_triggers": ["never"],
+            "steps": ["s"],
+            "evidence": [{"quote": "q", "kind": "note"}],
+            "explicit_rule": False,
+            "recurrence_of": None,
+            "updates_existing_skill": None,
+        }
+        c.update(over)
+        return c
+
+    def test_first_occurrence_with_placeholder_verify_parks(self, initialized_workspace):
+        from mgit.core.skill import SkillConfig, route_candidate
+
+        ws = initialized_workspace
+        candidate = self._candidate(verify_command="cd {project-root} && npx vitest run {t-f}")
+        action, detail = route_candidate(ws, candidate, [], SkillConfig(), ["feat"])
+        assert action == "park", detail
+        assert candidate["verify_command"] is None, "placeholder command must be dropped"
+
+    def test_first_occurrence_with_a_real_verify_still_drafts(self, initialized_workspace):
+        from mgit.core.skill import SkillConfig, route_candidate
+
+        ws = initialized_workspace
+        candidate = self._candidate(verify_command="npx tsc --noEmit")
+        action, _ = route_candidate(ws, candidate, [], SkillConfig(), ["feat"])
+        assert action == "draft"
