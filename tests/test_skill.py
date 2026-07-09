@@ -106,7 +106,9 @@ def test_gate_prose_first_occurrence_parks(initialized_workspace):
 
 def test_gate_explicit_rule_drafts(initialized_workspace):
     ws = initialized_workspace
-    action, _ = skill.route_candidate(ws, _candidate(explicit_rule=True), [], SkillConfig(), ["f"])
+    # explicit_rule only counts when a verbatim quote states the rule
+    candidate = _candidate(explicit_rule=True, evidence=[{"quote": "always run the seed script first, no exceptions", "kind": "decision"}])
+    action, _ = skill.route_candidate(ws, candidate, [], SkillConfig(), ["f"])
     assert action == "draft"
     assert (ws.skills_dir / "drafts" / "seed-before-e2e" / "SKILL.md").is_file()
 
@@ -184,7 +186,7 @@ def test_recurrence_promotes_and_resolves_parked(initialized_workspace):
 def test_approve_activates_and_updates_ambient_brief(initialized_workspace):
     ws = initialized_workspace
     name = _feature_with_journal(ws)
-    skill.render_draft(ws, _candidate(explicit_rule=True), features=[name])
+    skill.render_draft(ws, _candidate(explicit_rule=True, evidence=[{"quote": "always run the seed script first, no exceptions", "kind": "decision"}]), features=[name])
     dest = SkillManager(ws).approve("seed-before-e2e")
     assert dest == ws.skills_dir / "active" / "seed-before-e2e"
     assert skill.read_meta(dest)["status"] == "active"
@@ -230,7 +232,11 @@ def test_distill_end_to_end_with_stub(initialized_workspace):
     ws = initialized_workspace
     _feature_with_journal(ws)
     _stub_claude(ws, {"candidates": [
-        _candidate(slug="keep-me", explicit_rule=True),
+        _candidate(
+            slug="keep-me",
+            explicit_rule=True,
+            evidence=[{"quote": "never skip the seed script", "kind": "decision"}],
+        ),
         _candidate(slug="drop-me", kind="one-off"),
         _candidate(slug="park-me"),
     ]})
@@ -582,5 +588,71 @@ class TestPlaceholderVerifyDoesNotBuyADraft:
 
         ws = initialized_workspace
         candidate = self._candidate(verify_command="npx tsc --noEmit")
+        action, _ = route_candidate(ws, candidate, [], SkillConfig(), ["feat"])
+        assert action == "draft"
+
+
+class TestExplicitRuleMustRestOnEvidence:
+    """`explicit_rule` exempts a candidate from the n=2 rule. It is the model's
+    own claim about its evidence, and across five live distills the model set it
+    for design rationales -- eight candidates, none ever parked."""
+
+    def _candidate(self, quotes, **over):
+        c = {
+            "slug": "some-lesson",
+            "kind": "durable-convention",
+            "scope_level": "feature",
+            "trigger_description": "t",
+            "anti_triggers": ["never do x"],  # anti_triggers must not count
+            "steps": ["s"],
+            "evidence": [{"quote": q, "kind": "note"} for q in quotes],
+            "explicit_rule": True,
+            "recurrence_of": None,
+            "updates_existing_skill": None,
+            "verify_command": None,
+        }
+        c.update(over)
+        return c
+
+    def test_rationale_without_rule_language_parks(self, initialized_workspace):
+        from mgit.core.skill import SkillConfig, route_candidate
+
+        ws = initialized_workspace
+        candidate = self._candidate(
+            ["identity should be keyed by the invocation, not by the variable's name"]
+        )
+        action, detail = route_candidate(ws, candidate, [], SkillConfig(), ["feat"])
+        assert action == "park", detail
+        assert candidate["explicit_rule"] is False
+
+    def test_a_real_stated_rule_still_drafts(self, initialized_workspace):
+        from mgit.core.skill import SkillConfig, route_candidate
+
+        ws = initialized_workspace
+        for quote in [
+            "snapshot() must never throw on user values",
+            "Hard rule for src/engine/: capture visible() first",
+            "always run tsc before committing, no exceptions",
+            "do not commit on a green vitest alone",
+        ]:
+            candidate = self._candidate([quote])
+            action, _ = route_candidate(ws, candidate, [], SkillConfig(), ["feat"])
+            assert action == "draft", quote
+            assert candidate["explicit_rule"] is True
+
+    def test_anti_triggers_do_not_count_as_evidence_of_a_rule(self, initialized_workspace):
+        from mgit.core.skill import SkillConfig, route_candidate
+
+        ws = initialized_workspace
+        # "never do x" lives in anti_triggers, not in a verbatim evidence quote
+        candidate = self._candidate(["we discussed keying by callId"])
+        action, _ = route_candidate(ws, candidate, [], SkillConfig(), ["feat"])
+        assert action == "park"
+
+    def test_a_runnable_verify_still_drafts_without_rule_language(self, initialized_workspace):
+        from mgit.core.skill import SkillConfig, route_candidate
+
+        ws = initialized_workspace
+        candidate = self._candidate(["we settled on this"], verify_command="npx tsc --noEmit")
         action, _ = route_candidate(ws, candidate, [], SkillConfig(), ["feat"])
         assert action == "draft"

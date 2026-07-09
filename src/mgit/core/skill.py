@@ -590,6 +590,24 @@ def render_draft(ws: Workspace, candidate: dict, features: list[str]) -> Path:
 _PLACEHOLDER_RE = re.compile(r"(?<!\$)\{[a-zA-Z][a-zA-Z0-9]*(?:[-_][a-zA-Z0-9]+)+\}")
 
 
+# The schema defines explicit_rule as "the developer stated an explicit
+# never/always rule". A model will set it for any confidently-worded lesson, so
+# the claim is checked against the verbatim evidence it is supposed to rest on.
+_RULE_LANGUAGE_RE = re.compile(
+    r"\b(never|always|must|mandatory|required)\b"
+    r"|\bhard rule\b|\bno exceptions?\b|\bdo not\b|\bdon't\b|\bunder no circumstances\b",
+    re.IGNORECASE,
+)
+
+
+def evidence_states_a_rule(candidate: dict) -> bool:
+    """True when a verbatim evidence quote actually states a never/always rule."""
+    for item in candidate.get("evidence") or []:
+        if _RULE_LANGUAGE_RE.search(str(item.get("quote", ""))):
+            return True
+    return False
+
+
 def runnable_verify(command: str | None) -> str | None:
     """The command mgit could actually execute, or None.
 
@@ -641,10 +659,15 @@ def route_candidate(
     # tries to run `cd {project-root}`, and so it cannot buy a draft below.
     verify_cmd = runnable_verify(candidate.get("verify_command"))
     candidate["verify_command"] = verify_cmd
+    # explicit_rule is the model's own claim about the evidence. Believe it only
+    # when a verbatim quote bears it out; otherwise a confidently-phrased design
+    # rationale walks straight past the n=2 rule.
+    explicit = bool(candidate.get("explicit_rule")) and evidence_states_a_rule(candidate)
+    candidate["explicit_rule"] = explicit
     should_draft = (
         bool(candidate.get("updates_existing_skill"))
         or is_recurrence
-        or bool(candidate.get("explicit_rule"))
+        or explicit
         or bool(verify_cmd)
     )
     if not should_draft:

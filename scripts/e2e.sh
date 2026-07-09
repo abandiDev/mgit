@@ -146,6 +146,9 @@ check "ambient AGENTS.md generated" test -f .mgit/worktrees/pay-flow/AGENTS.md
 
 check "plan set" "$MGIT" feature plan --goal "Ship payment flow" --status "wiring" --next "api first" --next "then ui"
 check "note decision" "$MGIT" feature note "tokens live in svc-api only" --type decision
+# A stated rule, in the convention type the distiller harvests. The skill
+# stub below quotes it verbatim as the evidence for explicit_rule.
+check "note convention" "$MGIT" feature note "always run ./scripts/seed.sh before the e2e suite" --type convention
 "$MGIT" feature brief > "$SANDBOX/brief.txt" 2>&1
 check "brief shows goal" grep -q "Ship payment flow" "$SANDBOX/brief.txt"
 check "brief shows decision" grep -q "tokens live in svc-api only" "$SANDBOX/brief.txt"
@@ -168,7 +171,7 @@ cat > "$FAKE_DIR/skill_candidates.json" <<'EOF'
  {"slug":"seed-before-e2e","kind":"durable-convention","scope_level":"workspace","paths":[],
   "title":"Seed before e2e","trigger_description":"Run ./scripts/seed.sh before the e2e suite",
   "anti_triggers":["unit tests only"],"steps":["Run ./scripts/seed.sh"],"verify_command":null,
-  "evidence":[{"quote":"tokens live in svc-api only","kind":"decision"}],
+  "evidence":[{"quote":"always run ./scripts/seed.sh before the e2e suite","kind":"decision"}],
   "explicit_rule":true,"recurrence_of":null,"updates_existing_skill":null,"watched_paths":[]}]}}
 EOF
 cat > "$FAKE_BIN/claude" <<'FAKE'
