@@ -999,3 +999,99 @@ def test_cli_verify_failure_with_no_output_still_exits_1(initialized_workspace, 
     result = CliRunner().invoke(main, ["skill", "verify", "--yes"])
     assert result.exit_code == 1, result.output
     assert "no output" in result.output
+
+
+class TestNonRunnableVerifyIsNeverExecuted:
+    """runnable_verify() sanitised at distill time only. A skill minted before
+    that check carried `git stash push -- {source_file} && ! npx vitest run
+    {test_file}`, and `mgit skill verify` printed it, asked consent for it, and
+    ran it. Found by dogfooding mgit on a real feature."""
+
+    PLACEHOLDER = "git stash push -- {source_file} && npx vitest run {test_file}"
+
+    def _active(self, ws, command):
+        from mgit.core import skill
+        from mgit.core.feature import FeatureManager
+
+        FeatureManager(ws).start("feat", ["repo-a"])
+        skill.render_draft(
+            ws,
+            {
+                "slug": "legacy", "kind": "durable-procedure", "scope_level": "feature",
+                "trigger_description": "t", "anti_triggers": ["never"], "steps": ["s"],
+                "verify_command": command,
+                "evidence": [{"quote": "q", "kind": "decision"}],
+            },
+            features=["feat"],
+        )
+        dest = SkillManager(ws).approve("legacy")
+        # render_draft stores what it is given; simulate a pre-fix skill.toml
+        skill.update_meta(dest, verify_command=command, verify_pending=True)
+        return dest
+
+    def test_run_verify_for_refuses_without_executing(self, initialized_workspace):
+        from mgit.core.skill import SkillConfig, run_verify_for
+
+        ws = initialized_workspace
+        marker = ws.root / "should-not-exist.txt"
+        result = run_verify_for(
+            ws, f"touch {marker} && echo {{placeholder-here}}", {"repos": ["repo-a"]}, SkillConfig()
+        )
+        assert not result.ok
+        assert "placeholders" in result.output
+        assert not marker.exists(), "a command that can never pass must not run"
+
+    def test_it_is_not_offered_for_consent(self, initialized_workspace):
+        ws = initialized_workspace
+        self._active(ws, self.PLACEHOLDER)
+        mgr = SkillManager(ws)
+        assert mgr.pending_active_verify() == [], "nothing to consent to"
+        assert mgr.broken_active_verify() == ["legacy"]
+
+    def test_verify_active_reports_it_as_a_failure(self, initialized_workspace):
+        ws = initialized_workspace
+        self._active(ws, self.PLACEHOLDER)
+        results = SkillManager(ws).verify_active()
+        assert [(s, r.ok) for s, r in results] == [("legacy", False)]
+        assert "placeholders" in results[0][1].output
+
+    def test_cli_verify_exits_1_without_asking_consent(self, initialized_workspace, monkeypatch):
+        from click.testing import CliRunner
+
+        from mgit.cli import main
+
+        ws = initialized_workspace
+        self._active(ws, self.PLACEHOLDER)
+        monkeypatch.chdir(ws.root)
+        # no --yes: it must NOT refuse for consent, because nothing will run
+        result = CliRunner().invoke(main, ["skill", "verify"])
+        assert result.exit_code == 1, result.output
+        assert "consent" not in result.output.lower()
+
+    def test_approve_run_verify_refuses_a_placeholder_command(self, initialized_workspace):
+        from mgit.core import skill
+        from mgit.core.feature import FeatureManager
+
+        ws = initialized_workspace
+        FeatureManager(ws).start("feat", ["repo-a"])
+        skill.render_draft(
+            ws,
+            {
+                "slug": "d", "kind": "durable-procedure", "scope_level": "feature",
+                "trigger_description": "t", "anti_triggers": ["never"], "steps": ["s"],
+                "verify_command": self.PLACEHOLDER,
+                "evidence": [{"quote": "q", "kind": "decision"}],
+            },
+            features=["feat"],
+        )
+        skill.update_meta(ws.skills_dir / "drafts" / "d", verify_pending=True)
+        mgr = SkillManager(ws)
+        assert mgr.pending_verify("d") is None, "not offered for consent"
+        assert mgr.run_pending_verify("d").ok is False
+
+    def test_doctor_names_the_broken_command(self, initialized_workspace):
+        ws = initialized_workspace
+        self._active(ws, self.PLACEHOLDER)
+        report = "\n".join(SkillManager(ws).doctor())
+        assert "can never pass" in report
+        assert "legacy" in report

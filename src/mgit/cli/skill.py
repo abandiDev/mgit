@@ -224,12 +224,14 @@ def verify(slug, assume_yes, as_json):
     mgr = SkillManager(ws)
 
     pending = mgr.pending_active_verify(slug)
-    if not pending:
+    broken = mgr.broken_active_verify(slug)
+    if not pending and not broken:
         if as_json:
             output.emit("skill.verify", {"results": []})
             return
         click.echo("No active skill has a verify_command to run.")
         return
+    # Broken commands are reported, never executed, so nothing to consent to.
     _consent_to_run_many(pending, assume_yes, quiet=as_json)
 
     results = mgr.verify_active(slug)

@@ -722,6 +722,12 @@ def verify_sandbox(
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+NOT_RUNNABLE = (
+    "verify_command has unsubstituted {placeholders}; it can never pass. "
+    "Re-distill the skill, or clear the command in its skill.toml."
+)
+
+
 def run_verify_for(
     ws: Workspace,
     command: str,
@@ -734,6 +740,13 @@ def run_verify_for(
     The command is LLM-authored shell, so it never touches that tree directly —
     it runs in a disposable clone of it.
     """
+    # runnable_verify() sanitises at distill time, but a skill minted before that
+    # check — or one whose skill.toml was hand-edited — can still carry a command
+    # full of {placeholders}. Never execute it: it cannot pass, and asking a
+    # human to consent to shell that will only ever fail is worse than useless.
+    if runnable_verify(command) is None:
+        return VerifyResult(False, NOT_RUNNABLE, verify_cwd(ws, meta), ref="-", sandboxed=False)
+
     repo = verify_repo(ws, meta)
     if repo is None:
         # No single repo to clone; a repo-agnostic command runs at the root.
@@ -1023,10 +1036,10 @@ class SkillManager:
         """
         ws = self.ws
         meta = read_meta(_drafts_dir(ws) / slug)
-        command = meta.get("verify_command")
+        command = runnable_verify(meta.get("verify_command"))
         if not command or not meta.get("verify_pending"):
             return None
-        return str(command), verify_cwd(ws, meta)
+        return command, verify_cwd(ws, meta)
 
     # -- run a draft's pending verify with the human present --
     def run_pending_verify(self, slug: str) -> VerifyResult | None:
@@ -1068,17 +1081,32 @@ class SkillManager:
         return results
 
     def pending_active_verify(self, slug: str | None = None) -> list[tuple[str, str, Path]]:
-        """(slug, command, tree) for each active skill `verify_active` would run."""
+        """(slug, command, tree) for each active skill `verify_active` would RUN.
+
+        Skills whose command is not runnable are excluded: they are reported as
+        failures without executing, so there is nothing to consent to.
+        """
         ws = self.ws
         out = []
         for s in scan_active(ws):
             if slug is not None and s.slug != slug:
                 continue
-            if not s.verify_command:
+            command = runnable_verify(s.verify_command)
+            if not command:
                 continue
             meta = read_meta(_active_dir(ws) / s.slug)
-            out.append((s.slug, s.verify_command, verify_cwd(ws, meta)))
+            out.append((s.slug, command, verify_cwd(ws, meta)))
         return out
+
+    def broken_active_verify(self, slug: str | None = None) -> list[str]:
+        """Active skills carrying a verify_command that can never pass."""
+        return [
+            s.slug
+            for s in scan_active(self.ws)
+            if (slug is None or s.slug == slug)
+            and s.verify_command
+            and runnable_verify(s.verify_command) is None
+        ]
 
     # -- doctor --
     def doctor(self) -> list[str]:
@@ -1089,6 +1117,12 @@ class SkillManager:
         parked = [p for p in _read_jsonl(_parked_path(ws)) if p.get("status") == "parked"]
         lines.append(f"active skills: {len(active)}")
         for s in active:
+            if s.verify_command and runnable_verify(s.verify_command) is None:
+                lines.append(
+                    f"  {s.slug}: verify_command has unsubstituted {{placeholders}} and can "
+                    f"never pass — re-distill it, or clear the command in its skill.toml"
+                )
+                continue
             if s.verify_pending:
                 remedy = f" — run: mgit skill verify {s.slug}" if s.verify_command else ""
                 lines.append(f"  {s.slug}: approved but verify never ran{remedy}")
