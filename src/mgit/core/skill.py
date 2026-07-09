@@ -51,6 +51,9 @@ SKILL_MD = "SKILL.md"
 # only *requests* to constrain — so it is re-validated in Python before any use.
 VALID_SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{2,60}$")
 MAX_DESCRIPTION_CHARS = 1024
+
+# An anti-trigger written as an imperative rather than a situation clause.
+_IMPERATIVE_ANTI_RE = re.compile(r"^(do not|don't|never|avoid)\b", re.IGNORECASE)
 PARKED_MAX_AGE_DAYS = 45
 
 # Journal entry types that carry durable steering worth distilling. mgit-authored
@@ -461,7 +464,16 @@ def build_description(candidate: dict) -> str:
         desc += f" Use when working under {', '.join(candidate['paths'])}."
     anti = candidate.get("anti_triggers") or []
     if anti:
-        desc += f" Do not use when {str(anti[0]).rstrip('.')}."
+        first = str(anti[0]).strip().rstrip(".")
+        # The schema asks for a situation clause ("the repo has no pytest suite"),
+        # which takes the prefix. Models routinely answer with an imperative
+        # instead ("Do not expand this to every commit") — prefixing that yields
+        # "Do not use when Do not expand...". Imperatives stand as their own
+        # sentence; this string is what the ambient brief shows every session.
+        if _IMPERATIVE_ANTI_RE.match(first):
+            desc += f" {first}."
+        elif first:
+            desc += f" Do not use when {first}."
     if len(desc) > MAX_DESCRIPTION_CHARS:
         desc = desc[: MAX_DESCRIPTION_CHARS - 1] + "…"
     return desc

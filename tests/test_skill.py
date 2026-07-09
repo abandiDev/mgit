@@ -284,3 +284,37 @@ def test_cli_skill_reject_missing_exits_2(initialized_workspace, monkeypatch, ca
     except SystemExit as e:
         code = e.code
     assert code == 2  # domain error (MgitError) -> exit 2
+
+
+class TestBuildDescription:
+    """The description is what the ambient brief shows every session."""
+
+    def test_situation_clause_anti_trigger_takes_the_prefix(self):
+        desc = skill.build_description({
+            "trigger_description": "Before publishing a feature.",
+            "anti_triggers": ["the repo has no pytest suite."],
+        })
+        assert desc.endswith("Do not use when the repo has no pytest suite.")
+
+    def test_imperative_anti_trigger_is_not_double_prefixed(self):
+        # Verbatim from a live distiller run; the schema asks for a situation
+        # clause but models answer with an imperative.
+        desc = skill.build_description({
+            "trigger_description": "Before publishing a feature.",
+            "anti_triggers": ["Do not expand this into running the suite on every commit."],
+        })
+        assert "Do not use when Do not" not in desc
+        assert desc.endswith("Do not expand this into running the suite on every commit.")
+
+    @pytest.mark.parametrize("anti", ["Never publish on red.", "Don't do it.", "Avoid this."])
+    def test_other_imperative_forms(self, anti):
+        desc = skill.build_description({"trigger_description": "T.", "anti_triggers": [anti]})
+        assert "Do not use when" not in desc
+
+    def test_empty_anti_trigger_adds_no_dangling_clause(self):
+        desc = skill.build_description({"trigger_description": "T.", "anti_triggers": [""]})
+        assert desc == "T."
+
+    def test_description_is_truncated(self):
+        desc = skill.build_description({"trigger_description": "x" * 2000, "anti_triggers": []})
+        assert len(desc) <= skill.MAX_DESCRIPTION_CHARS
