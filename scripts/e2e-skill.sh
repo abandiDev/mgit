@@ -175,7 +175,7 @@ set_candidates "[
   \"title\":\"Typecheck mgit\",\"trigger_description\":\"Run mypy on the mgit package\",
   \"anti_triggers\":[\"none\"],\"steps\":[\"Run mypy\"],\"verify_command\":\"touch $MARKER\",
   \"evidence\":[{\"quote\":\"always run .venv/bin/ruff check src tests before committing mgit\",\"kind\":\"decision\"}],
-  \"explicit_rule\":false,\"recurrence_of\":null,\"updates_existing_skill\":null,\"watched_paths\":[]}]"
+  \"explicit_rule\":true,\"recurrence_of\":null,\"updates_existing_skill\":null,\"watched_paths\":[]}]"
 $MGIT skill distill >/dev/null 2>&1
 check "verify_command drafted, not executed" test ! -f "$MARKER"
 check "draft flagged verify-pending" bash -c \
@@ -198,7 +198,7 @@ set_candidates '[
   "title":"Bad check","trigger_description":"a check that fails","anti_triggers":["none"],
   "steps":["nope"],"verify_command":"false",
   "evidence":[{"quote":"skill evidence must be scrubbed before it reaches claude -p","kind":"decision"}],
-  "explicit_rule":false,"recurrence_of":null,"updates_existing_skill":null,"watched_paths":[]}]'
+  "explicit_rule":true,"recurrence_of":null,"updates_existing_skill":null,"watched_paths":[]}]'
 $MGIT skill distill >/dev/null 2>&1
 expect_exit "failing --run-verify refuses approval (exit 2)" 2 \
     "$MGIT" skill approve bad-check --run-verify --yes

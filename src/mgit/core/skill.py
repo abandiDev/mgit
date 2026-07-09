@@ -22,19 +22,20 @@ single flushed appends and temp+os.replace swaps, not flock.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
 import subprocess
 import tempfile
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 import tomli_w
 
-from mgit.core import llm, memory, redact
+from mgit.core import git, llm, memory, redact
 from mgit.core.workspace import Workspace
 from mgit.models.types import SkillInfo
 from mgit.utils.errors import MgitError, SkillNotFoundError
@@ -536,20 +537,25 @@ def _repos_of(ws: Workspace, features: list[str]) -> list[str]:
     return sorted(n for n in names if n in ws.repos)
 
 
-def verify_cwd(ws: Workspace, meta: dict) -> Path:
-    """Where a verify_command should run.
-
-    The repo it was learned in, when that is unambiguous. Otherwise the
-    workspace root, which is the old behaviour and only correct for a command
-    that is repo-agnostic.
-    """
+def verify_repo(ws: Workspace, meta: dict) -> str | None:
+    """The single repo a verify_command belongs to, or None if ambiguous."""
     repos = [r for r in (meta.get("repos") or []) if r in ws.repos]
     if not repos:
         # Drafts written before `repos` was recorded still know their features,
         # and falling back to the workspace root is exactly the bug this
         # function exists to fix.
         repos = _repos_of(ws, list(meta.get("features") or []))
-    return ws.repo_path(repos[0]) if len(repos) == 1 else ws.root
+    return repos[0] if len(repos) == 1 else None
+
+
+def verify_cwd(ws: Workspace, meta: dict) -> Path:
+    """The tree a verify_command validates.
+
+    The repo it was learned in, when that is unambiguous. Otherwise the
+    workspace root, which is only correct for a repo-agnostic command.
+    """
+    repo = verify_repo(ws, meta)
+    return ws.repo_path(repo) if repo else ws.root
 
 
 def render_draft(ws: Workspace, candidate: dict, features: list[str]) -> Path:
@@ -626,6 +632,59 @@ def runnable_verify(command: str | None) -> str | None:
     return None if _PLACEHOLDER_RE.search(command) else command.strip()
 
 
+@contextlib.contextmanager
+def verify_sandbox(ws: Workspace, repo_name: str, timeout: int) -> Iterator[Path]:
+    """A throwaway clone of `repo_name` at its current HEAD, removed afterwards.
+
+    A clone, not a `git worktree`: linked worktrees share the repository's refs,
+    so a `git stash pop` inside one consumes the real stash. A local clone gets
+    its own refs (objects are hardlinked, so it is cheap), and nothing the
+    command does to git state can reach the user's checkout.
+
+    The clone has no ignored files, so a JS or Python project would have no
+    dependencies installed. The repo's own `mgit repo setup` hook — the same one
+    that makes a feature worktree runnable — is run to provide them.
+    """
+    source = ws.repo_path(repo_name).resolve()
+    head = git.run_git("rev-parse", "HEAD", cwd=source, check=False).stdout.strip()
+    if not head:
+        raise MgitError(f"repo '{repo_name}' has no commits; cannot sandbox a verify")
+
+    tmp = Path(tempfile.mkdtemp(prefix="mgit-verify-"))
+    sandbox = tmp / repo_name
+    try:
+        git.run_git("clone", "--local", "--quiet", "--no-checkout",
+                    str(source), str(sandbox))
+        git.run_git("checkout", "--detach", head, cwd=sandbox)
+        setup = ws.get_repo(repo_name).setup
+        if setup:
+            subprocess.run(  # noqa: S602 - user-authored, same hook as materialize
+                setup, shell=True, cwd=str(sandbox),
+                capture_output=True, text=True, timeout=timeout,
+            )
+        yield sandbox
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def run_verify_for(
+    ws: Workspace, command: str, meta: dict, cfg: SkillConfig
+) -> tuple[bool, str, Path]:
+    """Run a verify_command against the tree it belongs to, in isolation.
+
+    Returns (ok, output, validated_tree). The command is LLM-authored shell, so
+    it never touches that tree directly — it runs in a disposable clone of it.
+    """
+    repo = verify_repo(ws, meta)
+    if repo is None:
+        # No single repo to clone; a repo-agnostic command runs at the root.
+        ok, output = run_verify(command, ws.root, cfg.verify_timeout)
+        return ok, output, ws.root
+    with verify_sandbox(ws, repo, cfg.verify_timeout) as sandbox:
+        ok, output = run_verify(command, sandbox, cfg.verify_timeout)
+    return ok, output, ws.repo_path(repo)
+
+
 def run_verify(command: str, cwd: Path, timeout: int) -> tuple[bool, str]:
     try:
         proc = subprocess.run(
@@ -661,27 +720,33 @@ def route_candidate(
     is_recurrence = bool(recurrence and recurrence in parked_ids) or slug in parked_ids
 
     # A placeholder command is not a verification. Drop it so nothing downstream
-    # tries to run `cd {project-root}`, and so it cannot buy a draft below.
-    verify_cmd = runnable_verify(candidate.get("verify_command"))
-    candidate["verify_command"] = verify_cmd
+    # tries to run `cd {project-root}`.
+    candidate["verify_command"] = runnable_verify(candidate.get("verify_command"))
+    verify_cmd = candidate["verify_command"]
     # explicit_rule is the model's own claim about the evidence. Believe it only
     # when a verbatim quote bears it out; otherwise a confidently-phrased design
     # rationale walks straight past the n=2 rule.
     explicit = bool(candidate.get("explicit_rule")) and evidence_states_a_rule(candidate)
     candidate["explicit_rule"] = explicit
+    # A verify_command says the skill is CHECKABLE. The n=2 rule asks whether the
+    # lesson is DURABLE. Those are different questions, and treating the first as
+    # an answer to the second let `test -f vitest.config.ts && test -d
+    # node_modules/vitest` — runnable, tautological, silent about the lesson —
+    # draft a first-occurrence observation. Durability is decided here; the
+    # command is still carried onto the draft and gated at approve time.
     should_draft = (
         bool(candidate.get("updates_existing_skill"))
         or is_recurrence
         or explicit
-        or bool(verify_cmd)
     )
     if not should_draft:
         return "park", "prose lesson, first occurrence (n=2 rule)"
 
     verified = False
     if verify_cmd and cfg.allow_auto_verify:
-        cwd = verify_cwd(ws, {"repos": _repos_of(ws, scope_features)})
-        ok, output = run_verify(verify_cmd, cwd, cfg.verify_timeout)
+        ok, output, _tree = run_verify_for(
+            ws, verify_cmd, {"repos": _repos_of(ws, scope_features)}, cfg
+        )
         if not ok:
             candidate["verify_failure"] = output
             return "park", f"verify_command failed: {output[:200]}"
@@ -907,11 +972,10 @@ class SkillManager:
         command = meta.get("verify_command")
         if not command or not meta.get("verify_pending"):
             return None
-        cwd = verify_cwd(ws, meta)
-        ok, output = run_verify(command, cwd, cfg.verify_timeout)
+        ok, output, tree = run_verify_for(ws, str(command), meta, cfg)
         if ok:
             update_meta(draft_dir, verify_pending=False, verified_at=memory.utc_now())
-        return ok, output, cwd
+        return ok, output, tree
 
     # -- doctor --
     def doctor(self) -> list[str]:

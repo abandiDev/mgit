@@ -230,12 +230,24 @@ advertised in the ambient brief that every worktree session already loads.
 
 Distillation shells out to the `claude` CLI in headless mode (configurable under
 `[skills]` in `.mgit/config.toml`), and journal text is scrubbed for secret
-shapes before it leaves the machine. A draft's `verify_command` is written by an
-LLM from journal content, so it is **never executed during distill** — it runs
-under your eye at `mgit skill approve --run-verify`, which prints the command and
-the directory and asks before executing it (`--yes` to skip the prompt). It runs
-in the repo the skill was learned in, not the workspace root. Opt in to
-`allow-auto-verify` only if you accept unattended execution.
+shapes before it leaves the machine.
+
+A skill's `verify_command` says the skill is **checkable**; it says nothing about
+whether the lesson is **durable**. Only recurrence, an evidence-backed rule, or
+an amendment to an existing skill gets a candidate past the n=2 rule — a command
+never does, because `test -f vitest.config.ts` is runnable, tautological, and
+silent about the lesson it claims to verify.
+
+The command is written by an LLM from journal content, so it is **never executed
+during distill**. It runs at `mgit skill approve --run-verify`, which prints it,
+names the tree it validates, and asks before executing (`--yes` to skip the
+prompt). Execution happens in a **throwaway clone** of the repo the skill was
+learned in, so nothing the command does can reach your checkout — not `rm -rf`,
+and not `git stash pop`, which a `git worktree` would *not* have contained
+(linked worktrees share `refs/stash`). The repo's `mgit repo setup` hook runs in
+the clone first, so dependencies are present. A failing command refuses approval
+and leaves the draft alone. Opt into `allow-auto-verify` only if you accept
+unattended execution.
 
 ## Agent workflow
 

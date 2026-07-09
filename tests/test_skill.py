@@ -1,6 +1,8 @@
 """Tests for the skill distillation subsystem (mgit skill)."""
 
 import json
+import subprocess
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -134,7 +136,11 @@ def test_verify_command_not_executed_by_default(initialized_workspace, tmp_path)
     ws = initialized_workspace
     marker = tmp_path / "pwned"
     action, _ = skill.route_candidate(
-        ws, _candidate(verify_command=f"touch {marker}"), [], SkillConfig(), ["f"]
+        ws,
+        _candidate(verify_command=f"touch {marker}", explicit_rule=True, evidence=[{"quote": "always run the seed script first, no exceptions", "kind": "decision"}]),
+        [],
+        SkillConfig(),
+        ["f"],
     )
     assert action == "draft"
     assert not marker.exists(), "distiller executed an unreviewed model command"
@@ -146,7 +152,8 @@ def test_verify_command_not_executed_by_default(initialized_workspace, tmp_path)
 def test_verify_command_runs_when_opted_in(initialized_workspace):
     ws = initialized_workspace
     cfg = SkillConfig(allow_auto_verify=True)
-    action, _ = skill.route_candidate(ws, _candidate(verify_command="true"), [], cfg, ["f"])
+    candidate = _candidate(verify_command="true", explicit_rule=True, evidence=[{"quote": "always run the seed script first, no exceptions", "kind": "decision"}])
+    action, _ = skill.route_candidate(ws, candidate, [], cfg, ["f"])
     assert action == "draft"
     meta = skill.read_meta(ws.skills_dir / "drafts" / "seed-before-e2e")
     assert meta["verify_pending"] is False
@@ -156,7 +163,8 @@ def test_verify_command_runs_when_opted_in(initialized_workspace):
 def test_verify_fail_parks_when_opted_in(initialized_workspace):
     ws = initialized_workspace
     cfg = SkillConfig(allow_auto_verify=True)
-    action, detail = skill.route_candidate(ws, _candidate(verify_command="false"), [], cfg, ["f"])
+    candidate = _candidate(verify_command="false", explicit_rule=True, evidence=[{"quote": "always run the seed script first, no exceptions", "kind": "decision"}])
+    action, detail = skill.route_candidate(ws, candidate, [], cfg, ["f"])
     assert action == "park" and "verify_command failed" in detail
 
 
@@ -427,9 +435,12 @@ class TestVerifyRunsInTheRepo:
 
         ws = initialized_workspace
         FeatureManager(ws).start("feat", ["repo-a"])
-        # A marker that exists only inside repo-a, so `test -f` can only pass
-        # when the command runs there.
-        (ws.repo_path("repo-a") / "only-here.txt").write_text("x")
+        # A committed marker that exists only inside repo-a, so `test -f` can
+        # only pass when the command runs against that repo (in a clone of it).
+        repo = ws.repo_path("repo-a")
+        (repo / "only-here.txt").write_text("x")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "marker"], cwd=repo, check=True)
         skill.render_draft(
             ws,
             {
@@ -522,7 +533,7 @@ class TestVerifyCommandNeedsConsent:
         assert result.exit_code != 0
         assert not marker.exists()
 
-    def test_yes_executes_and_approves(self, initialized_workspace, monkeypatch):
+    def test_yes_executes_but_the_repo_is_never_touched(self, initialized_workspace, monkeypatch):
         from click.testing import CliRunner
 
         from mgit.cli import main
@@ -530,22 +541,25 @@ class TestVerifyCommandNeedsConsent:
         ws = initialized_workspace
         monkeypatch.chdir(ws.root)
         marker = ws.repo_path("repo-a") / "ran.txt"
+        # exits 0 (so approval proceeds) and writes a file (which must not survive)
         self._draft(ws, "touch ran.txt")
 
         result = CliRunner().invoke(
             main, ["skill", "approve", "risky", "--run-verify", "--yes"]
         )
         assert result.exit_code == 0, result.output
-        assert marker.exists(), "with --yes the command runs, in the repo"
-        assert (ws.skills_dir / "active" / "risky").is_dir()
+        assert (ws.skills_dir / "active" / "risky").is_dir(), "verify passed, so it approves"
+        assert not marker.exists(), "the command ran in a throwaway clone, not the repo"
 
 
-class TestPlaceholderVerifyDoesNotBuyADraft:
-    """A verify_command's presence exempts a candidate from the n=2 rule.
+class TestVerifyCommandDoesNotRoute:
+    """A verify_command says a skill is CHECKABLE; the n=2 rule asks whether the
+    lesson is DURABLE. It used to answer the second question with the first.
 
-    A live distiller run emitted `cd {project-root} && npx vitest run
-    {test-file-path}` for a first-occurrence prose observation. That command can
-    never exit 0, so it proves nothing — yet it drafted the candidate.
+    Live runs showed both failure modes: `cd {project-root} && npx vitest run
+    {test-file-path}` (never exits 0, proves nothing) and `test -f
+    vitest.config.ts && test -d node_modules/vitest` (runnable, tautological,
+    silent about the lesson). Both drafted first-occurrence observations.
     """
 
     def test_placeholder_commands_are_not_runnable(self):
@@ -584,7 +598,7 @@ class TestPlaceholderVerifyDoesNotBuyADraft:
         c.update(over)
         return c
 
-    def test_first_occurrence_with_placeholder_verify_parks(self, initialized_workspace):
+    def test_a_placeholder_command_is_stripped_from_the_candidate(self, initialized_workspace):
         from mgit.core.skill import SkillConfig, route_candidate
 
         ws = initialized_workspace
@@ -593,12 +607,23 @@ class TestPlaceholderVerifyDoesNotBuyADraft:
         assert action == "park", detail
         assert candidate["verify_command"] is None, "placeholder command must be dropped"
 
-    def test_first_occurrence_with_a_real_verify_still_drafts(self, initialized_workspace):
+    def test_even_a_real_verify_does_not_buy_a_draft(self, initialized_workspace):
         from mgit.core.skill import SkillConfig, route_candidate
 
         ws = initialized_workspace
         candidate = self._candidate(verify_command="npx tsc --noEmit")
-        action, _ = route_candidate(ws, candidate, [], SkillConfig(), ["feat"])
+        action, detail = route_candidate(ws, candidate, [], SkillConfig(), ["feat"])
+        assert action == "park", detail
+        # ...but the command is carried onto the parked candidate for later
+        assert candidate["verify_command"] == "npx tsc --noEmit"
+
+    def test_a_recurrence_with_a_verify_still_drafts(self, initialized_workspace):
+        from mgit.core.skill import SkillConfig, route_candidate
+
+        ws = initialized_workspace
+        parked = [{"id": "prose-lesson", "status": "parked"}]
+        candidate = self._candidate(verify_command="npx tsc --noEmit")
+        action, _ = route_candidate(ws, candidate, parked, SkillConfig(), ["feat"])
         assert action == "draft"
 
 
@@ -659,10 +684,97 @@ class TestExplicitRuleMustRestOnEvidence:
         action, _ = route_candidate(ws, candidate, [], SkillConfig(), ["feat"])
         assert action == "park"
 
-    def test_a_runnable_verify_still_drafts_without_rule_language(self, initialized_workspace):
+    def test_a_runnable_verify_no_longer_rescues_a_rationale(self, initialized_workspace):
         from mgit.core.skill import SkillConfig, route_candidate
 
         ws = initialized_workspace
         candidate = self._candidate(["we settled on this"], verify_command="npx tsc --noEmit")
         action, _ = route_candidate(ws, candidate, [], SkillConfig(), ["feat"])
-        assert action == "draft"
+        assert action == "park"
+
+
+class TestVerifySandboxIsolatesGitState:
+    """The verify_command is LLM-authored shell. One live run produced
+    `git stash push … ; git stash pop`, which would have popped an unrelated
+    stash into the working tree.
+
+    A `git worktree` does NOT isolate this: linked worktrees share refs/stash,
+    so `git stash pop` inside one consumes the real stash. A local clone gets
+    its own refs, so it does.
+    """
+
+    def _stash_something(self, repo):
+        (repo / "README.md").write_text("PRECIOUS uncommitted work")
+        subprocess.run(["git", "stash", "push", "-q", "-m", "precious"], cwd=repo, check=True)
+
+    def test_a_stash_popping_command_cannot_touch_the_real_stash(self, initialized_workspace):
+        from mgit.core.skill import SkillConfig, run_verify_for
+
+        ws = initialized_workspace
+        repo = ws.repo_path("repo-a")
+        self._stash_something(repo)
+        before = subprocess.run(
+            ["git", "stash", "list"], cwd=repo, capture_output=True, text=True
+        ).stdout
+
+        ok, _out, tree = run_verify_for(
+            ws, "git stash pop -q || true", {"repos": ["repo-a"]}, SkillConfig()
+        )
+        assert ok
+        assert tree == repo, "it reports the tree it validated"
+
+        after = subprocess.run(
+            ["git", "stash", "list"], cwd=repo, capture_output=True, text=True
+        ).stdout
+        assert after == before, "the real stash survived"
+        assert "precious" in after
+
+    def test_a_destructive_command_cannot_touch_the_working_tree(self, initialized_workspace):
+        from mgit.core.skill import SkillConfig, run_verify_for
+
+        ws = initialized_workspace
+        repo = ws.repo_path("repo-a")
+        assert (repo / "README.md").exists()
+
+        ok, _out, _tree = run_verify_for(
+            ws, "rm -rf README.md && git checkout --orphan wiped", {"repos": ["repo-a"]}, SkillConfig()
+        )
+        assert ok
+        assert (repo / "README.md").exists(), "the file survived; the command hit a clone"
+        branch = subprocess.run(
+            ["git", "branch", "--show-current"], cwd=repo, capture_output=True, text=True
+        ).stdout.strip()
+        assert branch != "wiped", "the real repo's HEAD was not moved"
+
+    def test_the_sandbox_sees_the_repo_at_head(self, initialized_workspace):
+        from mgit.core.skill import SkillConfig, run_verify_for
+
+        ws = initialized_workspace
+        ok, _out, _tree = run_verify_for(
+            ws, "test -f README.md", {"repos": ["repo-a"]}, SkillConfig()
+        )
+        assert ok, "committed content is present in the sandbox"
+
+    def test_the_sandbox_is_removed_afterwards(self, initialized_workspace):
+        from mgit.core.skill import SkillConfig, run_verify_for
+
+        ws = initialized_workspace
+        ok, out, _tree = run_verify_for(ws, "pwd", {"repos": ["repo-a"]}, SkillConfig())
+        assert ok
+        sandbox = out.strip().splitlines()[-1]
+        assert not Path(sandbox).exists(), f"sandbox {sandbox} outlived the verify"
+
+    def test_the_repo_setup_hook_provisions_the_sandbox(self, initialized_workspace):
+        """A clone has no ignored files, so dependencies must be re-provided."""
+        from mgit.core.skill import SkillConfig, run_verify_for
+
+        ws = initialized_workspace
+        info = ws.get_repo("repo-a")
+        info.setup = "mkdir -p node_modules && touch node_modules/.installed"
+        ws.save()
+
+        ok, _out, _tree = run_verify_for(
+            ws, "test -f node_modules/.installed", {"repos": ["repo-a"]}, SkillConfig()
+        )
+        assert ok, "the repo's setup hook ran inside the sandbox"
+        assert not (ws.repo_path("repo-a") / "node_modules").exists()

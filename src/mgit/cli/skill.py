@@ -129,14 +129,16 @@ def _consent_to_run(command: str, cwd, assume_yes: bool, quiet: bool = False) ->
     """
     if not quiet:
         click.secho("verify_command was written by an LLM from journal text.", fg="yellow")
-        click.echo(f"  cwd: {cwd}")
-        click.echo(f"  run: {command}")
+        click.echo(f"  validates: {cwd}")
+        click.echo("  runs in:   a throwaway clone (your checkout is not touched)")
+        click.echo(f"  run:       {command}")
     if assume_yes:
         return
     if not sys.stdin.isatty():
         raise MgitError(
-            f"verify_command needs consent before it runs as shell in {cwd}:\n"
+            f"verify_command needs consent before it runs as shell against {cwd}:\n"
             f"  {command}\n"
+            "It executes in a throwaway clone, but it is still LLM-authored.\n"
             "Non-interactive session — re-run with --yes to execute it."
         )
     if not click.confirm("Execute it?", default=False):
@@ -178,10 +180,10 @@ def approve(slug, run_verify, assume_yes, as_json):
         return
     click.secho(f"approved {slug} -> {dest}", fg="green")
     if verify_result and verify_result[0]:
-        # Say where it ran: a repo-relative command that silently ran in the
-        # workspace root would sweep every repo and worktree, and could pass
-        # while the intended target fails.
-        click.echo(f"  verify_command passed (in {verify_result[2]})")
+        # Say what it validated: a repo-relative command that silently ran in
+        # the workspace root would sweep every repo and worktree, and could
+        # pass while the intended target fails.
+        click.echo(f"  verify_command passed against {verify_result[2]}")
 
 
 @skill.command("reject")
