@@ -544,6 +544,11 @@ def verify_cwd(ws: Workspace, meta: dict) -> Path:
     that is repo-agnostic.
     """
     repos = [r for r in (meta.get("repos") or []) if r in ws.repos]
+    if not repos:
+        # Drafts written before `repos` was recorded still know their features,
+        # and falling back to the workspace root is exactly the bug this
+        # function exists to fix.
+        repos = _repos_of(ws, list(meta.get("features") or []))
     return ws.repo_path(repos[0]) if len(repos) == 1 else ws.root
 
 

@@ -388,6 +388,16 @@ class TestVerifyRunsInTheRepo:
         ws = initialized_workspace
         assert skill.verify_cwd(ws, {"repos": ["repo-a", "gone"]}) == ws.repo_path("repo-a")
 
+    def test_legacy_draft_without_repos_resolves_via_its_features(self, initialized_workspace):
+        """Drafts written before `repos` existed must not fall back to the root."""
+        from mgit.core import skill
+        from mgit.core.feature import FeatureManager
+
+        ws = initialized_workspace
+        FeatureManager(ws).start("feat", ["repo-a"])
+        assert skill.verify_cwd(ws, {"features": ["feat"]}) == ws.repo_path("repo-a")
+        assert skill.verify_cwd(ws, {"features": ["feat"]}) != ws.root
+
     def test_draft_records_the_repos_it_came_from(self, initialized_workspace):
         from mgit.core import skill
         from mgit.core.feature import FeatureManager
