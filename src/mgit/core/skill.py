@@ -180,7 +180,8 @@ class SkillConfig:
     model: str = ""
     # A verify_command is written by the LLM from journal content that may be
     # attacker-influenced. Executing it during distill is code execution with no
-    # human present, so it is opt-in; otherwise it runs at `mgit skill review`.
+    # human present, so it is opt-in; otherwise it runs at
+    # `mgit skill approve --run-verify`.
     allow_auto_verify: bool = False
     verify_timeout: int = 120
     distill_timeout: int = 600
@@ -594,8 +595,8 @@ def route_candidate(
 
     draft_dir = render_draft(ws, candidate, features=scope_features)
     if verify_cmd:
-        # Unverified drafts carry the command forward; `mgit skill review` runs
-        # it under the human's eye rather than in this distill process.
+        # Unverified drafts carry the command forward; `mgit skill approve
+        # --run-verify` runs it under the human's eye, not in this distill process.
         update_meta(
             draft_dir,
             verify_pending=not verified,
@@ -814,7 +815,8 @@ class SkillManager:
         lines.append(f"active skills: {len(active)}")
         for s in active:
             if s.verify_pending:
-                lines.append(f"  {s.slug}: approved but verify never ran — `mgit skill review`")
+                remedy = f" — run: {s.verify_command}" if s.verify_command else ""
+                lines.append(f"  {s.slug}: approved but verify never ran{remedy}")
         lines.append(f"drafts awaiting review: {len(drafts)}")
         for d in drafts:
             lines.append(f"  {d.slug} ({d.scope_level})")

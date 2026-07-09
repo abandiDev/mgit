@@ -14,6 +14,7 @@ Modern projects often span multiple repositories — a frontend app, a backend A
 - **Keep a working memory per feature** — an auto-populated journal + plan file that an AI agent (or you, next Monday) recovers with one `mgit feature brief` call
 - **Fork features like branches, across all repos at once** — try two approaches as sibling variants with pinned base SHAs and inherited memory
 - **Checkpoint and restore a whole feature** — non-destructive cross-repo save-points covering committed *and* uncommitted work
+- **Distill durable skills** out of what you learned across features — you review them, then every future agent session loads them automatically
 
 ## Installation
 
@@ -200,9 +201,43 @@ memory (goal, status, recent decisions) and cross-link the sibling PRs.
 Re-running is idempotent: new commits are pushed and existing PRs updated, never
 duplicated. Authentication belongs to `gh`/`glab` — mgit never touches tokens.
 
+### 11. Distill durable skills from what you learned
+
+Working memory is per-feature: it dies with the feature. `mgit skill` graduates
+the *durable* lessons out of it, so a convention learned in `auth-refactor`
+reaches next month's feature without anyone remembering to mention it.
+
+```bash
+mgit skill distill                    # mine steering across every feature
+#   pin-fork-base-shas: draft (.mgit/skills/drafts/pin-fork-base-shas)
+#   prefer-shim-until-migrated: park (prose lesson, first occurrence (n=2 rule))
+#   rename-authctx-var: drop (classified one-off)
+
+mgit skill drafts                     # what is awaiting review
+mgit skill show pin-fork-base-shas    # read the full SKILL.md
+mgit skill approve pin-fork-base-shas --run-verify
+mgit skill reject rename-authctx-var --reason "specific to one repo"
+mgit skill doctor                     # active / drafts / parked backlog
+```
+
+Nothing reaches an agent unreviewed. A candidate is **dropped** if the distiller
+classifies it a one-off, **parked** if it is a first-occurrence prose lesson (the
+n=2 rule — it must recur to earn a draft), and promoted to a **draft** only when
+it recurs, states an explicit rule, updates an existing skill, or ships a
+`verify_command`. Drafts go live only via `mgit skill approve`; `mgit skill
+reject` tombstones a slug so it is never proposed again. Approved skills are
+advertised in the ambient brief that every worktree session already loads.
+
+Distillation shells out to the `claude` CLI in headless mode (configurable under
+`[skills]` in `.mgit/config.toml`), and journal text is scrubbed for secret
+shapes before it leaves the machine. A draft's `verify_command` is written by an
+LLM from journal content, so it is **never executed during distill** — it runs
+under your eye at `mgit skill approve --run-verify`, unless you opt in to
+`allow-auto-verify`.
+
 ## Agent workflow
 
-mgit is built agent-first. Three layers, from ambient to programmatic:
+mgit is built agent-first. Four layers, from ambient to programmatic:
 
 **Ambient (zero config).** mgit generates `CLAUDE.md` and `AGENTS.md` at
 `.mgit/worktrees/<feature>/` — an ancestor of every worktree, outside every
@@ -216,6 +251,11 @@ edit them by hand.
 first, `note` decisions as they happen, `plan --status`/`--done` before the
 session ends, `commit -f .` (auto-journaled). Memory survives context-window
 resets by construction.
+
+**Durable skills.** `mgit skill distill` mines the journals for lessons that
+outlive the feature, gates them behind the n=2 rule and your explicit approval,
+then advertises the approved set in the ambient brief above. Working memory
+carries a feature; skills carry the workspace.
 
 **Machine contract.**
 
@@ -260,6 +300,7 @@ mgit push -f .
 | `mgit repo add <url\|path> [--name ALIAS]` | Clone a remote repo or link a local one |
 | `mgit repo remove <name>` | Unregister a repo (files are kept) |
 | `mgit repo list` | List all registered repos |
+| `mgit repo setup <name> [CMD] [--clear]` | Show, set, or clear a repo's post-materialization setup command |
 
 ### Features
 
@@ -297,6 +338,18 @@ mgit push -f .
 | `mgit checkpoint restore <id> [-f NAME]` | Restore code + memory; always auto-saves a safety backup first |
 | `mgit checkpoint list / show <id> / delete <id>` | Inspect or drop checkpoints (delete unpins refs so gc can reclaim) |
 
+### Skills
+
+| Command | Description |
+|---|---|
+| `mgit skill distill [-f NAME] [--dry-run] [--json]` | Mine durable skills from journals; `--dry-run` prints the prompt and calls nothing |
+| `mgit skill drafts [--json]` | List drafts awaiting review |
+| `mgit skill show <slug> [--json]` | Print a draft's full SKILL.md |
+| `mgit skill approve <slug> [--run-verify] [--json]` | Promote a draft into the active set; `--run-verify` refuses approval if its `verify_command` fails |
+| `mgit skill reject <slug> --reason TEXT [--json]` | Tombstone a draft so it is never re-proposed |
+| `mgit skill list [--json]` | List active skills advertised in the ambient brief |
+| `mgit skill doctor [--json]` | Health report: active skills, drafts, parked backlog |
+
 ### Bulk operations
 
 | Command | Description |
@@ -306,6 +359,7 @@ mgit push -f .
 | `mgit push` | Push across repos |
 | `mgit commit -m <msg>` | Commit across repos (stages all changes) |
 | `mgit exec <cmd...>` | Run an arbitrary command in each repo |
+| `mgit setup` | Run each repo's configured setup command (skips repos with none, or with no worktree) |
 
 All bulk commands support:
 
@@ -326,12 +380,15 @@ All bulk commands support:
 - **Forks**: lineage (`parent`, pinned `fork_base` SHAs) lives in the feature file, never in branch names; forked children push to their own remote branch by default
 - **Checkpoints**: manifests at `.mgit/checkpoints/<feature>/`, snapshots pinned by `refs/mgit/checkpoint/...` (gc-immune, never pushed)
 - **One agent per feature**: the plan file is last-writer-wins (the journal preserves overwritten history); fork a variant instead of sharing a feature
+- **Skills**: everything under `.mgit/skills/` — `drafts/` awaiting review, `active/` advertised in the ambient brief, plus `parked.jsonl` (n=1 candidates), `tombstones.jsonl` (rejected, never re-proposed), `ledger.jsonl` (decisions). Only `mgit skill approve` makes a skill visible to agents
 - **Upgrading from an older mgit**: behavior fixes apply the moment the binary is upgraded — on-disk state is additive and lazy, old feature files load unchanged. Run `mgit upgrade` once per workspace: it refreshes AGENT.md/AGENTS.md and the ambient briefs, then health-checks for state older versions left behind (bogus repo registrations, orphaned sandbox branches/refs of deleted features, mixed target branches, orphaned sidecars); `mgit upgrade --fix` applies the mechanical repairs and reports the rest with manual remedies. Only behavior change: usage errors now exit `3` (was `1`), and carry prompts refuse non-TTY sessions instead of hanging
 
 ## Requirements
 
 - Python 3.11+
 - Git
+- `gh` / `glab` — only for `mgit feature publish` and `mgit feature checks`
+- `claude` — only for `mgit skill distill`
 
 ## Development
 
