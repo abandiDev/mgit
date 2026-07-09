@@ -326,7 +326,7 @@ mgit push -f .
 | Command | Description |
 |---|---|
 | `mgit feature brief [-f NAME] [--json] [--full] [--refresh]` | One-call re-orientation: plan + journal tail + live git facts |
-| `mgit feature note TEXT [--type note\|decision\|question\|handoff]` | Append an agent-authored journal entry |
+| `mgit feature note TEXT [--type note\|decision\|convention\|question\|handoff]` | Append an agent-authored journal entry |
 | `mgit feature plan [--goal] [--status] [--next]... [--add-next]... [--done N]... [--ask]... [--resolve N]...` | Read/update the structured plan. `--done`/`--resolve` are repeatable and index the list as you last saw it |
 | `mgit feature log [-n N] [--type TYPE] [--commits] [--json]` | Read the journal; `--commits` interleaves git commits across repos |
 

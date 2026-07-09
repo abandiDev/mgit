@@ -25,7 +25,10 @@ STATE_FILE = "memory.toml"
 JOURNAL_FILE = "journal.jsonl"
 
 # Journal entry types an agent may write; "event" is reserved for mgit itself.
-NOTE_TYPES = ("note", "decision", "question", "handoff")
+# Must stay a superset-free match with skill.EVIDENCE_TYPES: the distiller
+# harvests every one of these, so a type it expects but nobody can write is a
+# dead branch (that is what happened to "convention").
+NOTE_TYPES = ("note", "decision", "convention", "question", "handoff")
 
 
 def utc_now() -> str:

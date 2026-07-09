@@ -482,7 +482,7 @@ def brief(feature_name, as_json, full, refresh):
 @click.argument("text")
 @click.option("--type", "-t", "note_type",
               type=click.Choice(memory.NOTE_TYPES), default="note",
-              help="Entry type (note, decision, question, handoff).")
+              help="Entry type (note, decision, convention, question, handoff).")
 @click.option("--feature", "-f", "feature_name", default=None,
               help="Feature name (default: active).")
 def note(text, note_type, feature_name):

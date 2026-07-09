@@ -318,3 +318,37 @@ class TestBuildDescription:
     def test_description_is_truncated(self):
         desc = skill.build_description({"trigger_description": "x" * 2000, "anti_triggers": []})
         assert len(desc) <= skill.MAX_DESCRIPTION_CHARS
+
+
+class TestEvidenceTypesAreWritable:
+    """The distiller harvested a journal type nobody could write.
+
+    EVIDENCE_TYPES listed "convention" while memory.NOTE_TYPES did not, so
+    `mgit feature note --type convention` was rejected by click and the
+    distiller's convention branch was unreachable.
+    """
+
+    def test_every_harvested_type_can_be_written(self):
+        from mgit.core import memory, skill
+
+        unwritable = set(skill.EVIDENCE_TYPES) - set(memory.NOTE_TYPES)
+        assert not unwritable, f"distiller harvests types no CLI can emit: {unwritable}"
+
+    def test_convention_notes_reach_the_distiller(self, initialized_workspace, monkeypatch):
+        from click.testing import CliRunner
+
+        from mgit.cli import main
+        from mgit.core import skill
+        from mgit.core.feature import FeatureManager
+
+        ws = initialized_workspace
+        monkeypatch.chdir(ws.root)
+        FeatureManager(ws).start("feat", ["repo-a"])
+
+        result = CliRunner().invoke(
+            main, ["feature", "note", "always guard property reads", "--type", "convention"]
+        )
+        assert result.exit_code == 0, result.output
+
+        evidence = skill.gather_evidence(ws)
+        assert any(e["type"] == "convention" for e in evidence), evidence
