@@ -18,6 +18,10 @@ from mgit.utils.errors import (
     RepoNotFoundError,
 )
 
+# FeatureManager.list() shadows the builtin inside that class's body, so
+# annotations there cannot spell list[str] directly.
+StrList = list[str]
+
 # Feature names become branch refs (mgit/<name>), checkpoint refs, and
 # directory names — reject anything path- or ref-hostile.
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -166,7 +170,7 @@ class FeatureManager:
 
     def list(self) -> list[FeatureInfo]:
         """List all features."""
-        features = []
+        features: list[FeatureInfo] = []
         if not self.ws.features_dir.exists():
             return features
         for path in sorted(self.ws.features_dir.glob("*.toml")):
@@ -249,14 +253,14 @@ class FeatureManager:
     def start(
         self,
         feature_name: str,
-        repo_names: list[str] | None = None,
+        repo_names: StrList | None = None,
         target_branch: str | None = None,
         description: str = "",
         materialize: bool = False,
         run_setup: bool = True,
         carry_repos: set[str] | None = None,
         activate: bool = True,
-    ) -> tuple[FeatureInfo, list[str]]:
+    ) -> tuple[FeatureInfo, StrList]:
         """Start working on a feature: create if needed, enroll repos.
 
         Args:
@@ -423,7 +427,7 @@ class FeatureManager:
         feature_name: str,
         run_setup: bool = True,
         carry_repos: set[str] | None = None,
-    ) -> list[str]:
+    ) -> StrList:
         """Discover dirty repos and enroll + materialize them into the feature.
 
         Scans all workspace repos for uncommitted changes, enrolls any that

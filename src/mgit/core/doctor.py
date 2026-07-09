@@ -52,11 +52,15 @@ def run_checks(ws: Workspace) -> list[Finding]:
         root = git.repo_root(path)
         if root is None or root.resolve() != path.resolve():
             inside = f" (it is inside the repo at {root})" if root else ""
+
+            def _unregister(n: str = name) -> None:
+                ws.remove_repo(n)
+
             findings.append(Finding(
                 f"repo '{name}' is registered but is not a git repo root"
                 f"{inside} — likely registered by an older mgit's scan",
                 fix_description=f"unregister repo '{name}' (files untouched)",
-                fix=lambda n=name: ws.remove_repo(n),
+                fix=_unregister,
             ))
 
     # 2. Features whose repos target diverging remote branches (old sync
@@ -88,7 +92,7 @@ def run_checks(ws: Workspace) -> list[Finding]:
             if feat in feature_names:
                 continue
 
-            def _delete_branch(r=repo, branch=f"mgit/{feat}"):
+            def _delete_branch(r: Repo = repo, branch: str = f"mgit/{feat}") -> None:
                 git.run_git("worktree", "prune", cwd=r.path, check=False)
                 git.run_git("branch", "-D", branch, cwd=r.path, check=False)
 
@@ -103,13 +107,17 @@ def run_checks(ws: Workspace) -> list[Finding]:
         for ref in sorted(mgit_refs):
             # refs/mgit/checkpoint/<feature>/<cp-id> | refs/mgit/wip/<feature>/<repo>
             parts = ref.split("/")
-            feat = parts[3] if len(parts) > 3 else None
-            if not feat or feat in feature_names:
+            ref_feature = parts[3] if len(parts) > 3 else None
+            if not ref_feature or ref_feature in feature_names:
                 continue
+
+            def _delete_ref(r: Repo = repo, rf: str = ref) -> None:
+                r.delete_ref(rf)
+
             findings.append(Finding(
                 f"{name}: orphaned ref '{ref}' pins objects for a deleted feature",
                 fix_description=f"delete ref '{ref}' in '{name}'",
-                fix=lambda r=repo, rf=ref: r.delete_ref(rf),
+                fix=_delete_ref,
             ))
 
     # 5. Sidecar/checkpoint directories whose feature file is gone

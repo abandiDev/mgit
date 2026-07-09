@@ -24,6 +24,10 @@ from mgit.core.workspace import Workspace
 from mgit.models.types import CheckpointInfo, CheckpointRepoState
 from mgit.utils.errors import MgitError
 
+# CheckpointManager.list() shadows the builtin inside that class's body, so
+# annotations there cannot spell list[str] directly.
+StrList = list[str]
+
 CHECKPOINT_REF_PREFIX = "refs/mgit/checkpoint"
 
 
@@ -178,7 +182,7 @@ class CheckpointManager:
 
     def restore(
         self, fm, feature_name: str, cp_id: str
-    ) -> tuple[CheckpointInfo, CheckpointInfo, list[str]]:
+    ) -> tuple[CheckpointInfo, CheckpointInfo, StrList]:
         """Restore a feature to a checkpoint.
 
         ALWAYS saves a safety checkpoint of the current state first — the
@@ -243,7 +247,7 @@ class CheckpointManager:
         self._manifest_path(feature_name, cp_id).unlink(missing_ok=True)
         self._memory_copy_path(feature_name, cp_id).unlink(missing_ok=True)
 
-    def delete_all_for_feature(self, feature_name: str, repo_names: list[str]) -> None:
+    def delete_all_for_feature(self, feature_name: str, repo_names: StrList) -> None:
         """Feature-delete cleanup: remove all manifests and per-repo refs."""
         for repo_name in repo_names:
             if repo_name not in self.ws.repos:
