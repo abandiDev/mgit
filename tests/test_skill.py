@@ -352,3 +352,84 @@ class TestEvidenceTypesAreWritable:
 
         evidence = skill.gather_evidence(ws)
         assert any(e["type"] == "convention" for e in evidence), evidence
+
+
+class TestVerifyRunsInTheRepo:
+    """A verify_command is written against a repo's layout ("npx vitest run
+    src/..."). Running it at the workspace root — a directory of symlinks and
+    worktrees — could sweep every repo at once and pass while the real target
+    failed."""
+
+    def test_verify_cwd_is_the_single_source_repo(self, initialized_workspace):
+        from mgit.core import skill
+
+        ws = initialized_workspace
+        cwd = skill.verify_cwd(ws, {"repos": ["repo-a"]})
+        assert cwd == ws.repo_path("repo-a")
+        assert cwd != ws.root
+
+    def test_verify_cwd_falls_back_to_root_when_ambiguous(self, initialized_workspace):
+        from mgit.core import skill
+
+        ws = initialized_workspace
+        assert skill.verify_cwd(ws, {"repos": ["repo-a", "repo-b"]}) == ws.root
+        assert skill.verify_cwd(ws, {"repos": []}) == ws.root
+        assert skill.verify_cwd(ws, {}) == ws.root
+
+    def test_verify_cwd_ignores_unregistered_repos(self, initialized_workspace):
+        from mgit.core import skill
+
+        ws = initialized_workspace
+        assert skill.verify_cwd(ws, {"repos": ["repo-a", "gone"]}) == ws.repo_path("repo-a")
+
+    def test_draft_records_the_repos_it_came_from(self, initialized_workspace):
+        from mgit.core import skill
+        from mgit.core.feature import FeatureManager
+
+        ws = initialized_workspace
+        FeatureManager(ws).start("feat", ["repo-a"])
+        draft = skill.render_draft(
+            ws,
+            {
+                "slug": "some-rule",
+                "kind": "durable-convention",
+                "scope_level": "feature",
+                "trigger_description": "t",
+                "anti_triggers": ["never"],
+                "steps": ["do it"],
+                "verify_command": "true",
+                "evidence": [{"quote": "q", "kind": "decision"}],
+            },
+            features=["feat"],
+        )
+        assert skill.read_meta(draft)["repos"] == ["repo-a"]
+
+    def test_pending_verify_runs_in_the_repo_not_the_root(self, initialized_workspace):
+        from mgit.core import skill
+        from mgit.core.feature import FeatureManager
+        from mgit.core.skill import SkillManager
+
+        ws = initialized_workspace
+        FeatureManager(ws).start("feat", ["repo-a"])
+        # A marker that exists only inside repo-a, so `test -f` can only pass
+        # when the command runs there.
+        (ws.repo_path("repo-a") / "only-here.txt").write_text("x")
+        skill.render_draft(
+            ws,
+            {
+                "slug": "cwd-rule",
+                "kind": "durable-convention",
+                "scope_level": "feature",
+                "trigger_description": "t",
+                "anti_triggers": ["never"],
+                "steps": ["do it"],
+                "verify_command": "test -f only-here.txt",
+                "evidence": [{"quote": "q", "kind": "decision"}],
+            },
+            features=["feat"],
+        )
+        skill.update_meta(ws.skills_dir / "drafts" / "cwd-rule", verify_pending=True)
+
+        ok, _output, cwd = SkillManager(ws).run_pending_verify("cwd-rule")
+        assert ok, "verify must run inside repo-a, where the marker lives"
+        assert cwd == ws.repo_path("repo-a")

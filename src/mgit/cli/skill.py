@@ -132,18 +132,25 @@ def approve(slug, run_verify, as_json):
         verify_result = mgr.run_pending_verify(slug)
         if verify_result is not None and not verify_result[0]:
             from mgit.utils.errors import MgitError
-            raise MgitError(f"verify_command failed; not approving:\n{verify_result[1][:500]}")
+            raise MgitError(
+                f"verify_command failed in {verify_result[2]}; not approving:\n"
+                f"{verify_result[1][:500]}"
+            )
     dest = mgr.approve(slug)
     if as_json:
         output.emit("skill.approve", {
             "slug": slug,
             "dest": str(dest),
             "verified": bool(verify_result and verify_result[0]),
+            "verify_cwd": str(verify_result[2]) if verify_result else None,
         })
         return
     click.secho(f"approved {slug} -> {dest}", fg="green")
     if verify_result and verify_result[0]:
-        click.echo("  verify_command passed")
+        # Say where it ran: a repo-relative command that silently ran in the
+        # workspace root would sweep every repo and worktree, and could pass
+        # while the intended target fails.
+        click.echo(f"  verify_command passed (in {verify_result[2]})")
 
 
 @skill.command("reject")

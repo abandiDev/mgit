@@ -521,6 +521,31 @@ def _contained(child: Path, parent: Path) -> bool:
     return True
 
 
+def _repos_of(ws: Workspace, features: list[str]) -> list[str]:
+    """Registered repos enrolled in any of `features`, sorted and deduped."""
+    from mgit.core.feature import FeatureManager
+
+    fm = FeatureManager(ws)
+    names: set[str] = set()
+    for feature in features:
+        try:
+            names.update(fm.get(feature).branches)
+        except Exception:
+            continue
+    return sorted(n for n in names if n in ws.repos)
+
+
+def verify_cwd(ws: Workspace, meta: dict) -> Path:
+    """Where a verify_command should run.
+
+    The repo it was learned in, when that is unambiguous. Otherwise the
+    workspace root, which is the old behaviour and only correct for a command
+    that is repo-agnostic.
+    """
+    repos = [r for r in (meta.get("repos") or []) if r in ws.repos]
+    return ws.repo_path(repos[0]) if len(repos) == 1 else ws.root
+
+
 def render_draft(ws: Workspace, candidate: dict, features: list[str]) -> Path:
     """Render a candidate into .mgit/skills/drafts/<slug>/ (never the active dir)."""
     slug = candidate["slug"]
@@ -545,6 +570,11 @@ def render_draft(ws: Workspace, candidate: dict, features: list[str]) -> Path:
             "status": "draft",
             "created_at": memory.utc_now(),
             "features": list(features),
+            # Which repos this skill was learned in. A verify_command is written
+            # against a repo's layout ("npx vitest run src/..."), so it has to
+            # run there — the workspace root is a directory of symlinks, not a
+            # project, and running there sweeps every repo and worktree at once.
+            "repos": _repos_of(ws, features),
             "updates": candidate.get("updates_existing_skill"),
         },
     )
@@ -599,7 +629,8 @@ def route_candidate(
 
     verified = False
     if verify_cmd and cfg.allow_auto_verify:
-        ok, output = run_verify(verify_cmd, ws.root, cfg.verify_timeout)
+        cwd = verify_cwd(ws, {"repos": _repos_of(ws, scope_features)})
+        ok, output = run_verify(verify_cmd, cwd, cfg.verify_timeout)
         if not ok:
             candidate["verify_failure"] = output
             return "park", f"verify_command failed: {output[:200]}"
@@ -805,17 +836,18 @@ class SkillManager:
         shutil.rmtree(draft_dir)
 
     # -- run a draft's pending verify with the human present --
-    def run_pending_verify(self, slug: str) -> tuple[bool, str] | None:
+    def run_pending_verify(self, slug: str) -> tuple[bool, str, Path] | None:
         ws, cfg = self.ws, self.cfg
         draft_dir = _drafts_dir(ws) / slug
         meta = read_meta(draft_dir)
         command = meta.get("verify_command")
         if not command or not meta.get("verify_pending"):
             return None
-        ok, output = run_verify(command, ws.root, cfg.verify_timeout)
+        cwd = verify_cwd(ws, meta)
+        ok, output = run_verify(command, cwd, cfg.verify_timeout)
         if ok:
             update_meta(draft_dir, verify_pending=False, verified_at=memory.utc_now())
-        return ok, output
+        return ok, output, cwd
 
     # -- doctor --
     def doctor(self) -> list[str]:
