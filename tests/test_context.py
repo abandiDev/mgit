@@ -7,7 +7,6 @@ from click.testing import CliRunner
 
 from mgit.cli import main
 from mgit.core.feature import FeatureManager
-from mgit.core.workspace import Workspace
 
 
 @pytest.fixture

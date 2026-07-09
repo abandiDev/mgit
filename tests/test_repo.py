@@ -1,15 +1,10 @@
 """Tests for repo operations."""
 
-import os
-import subprocess
-from pathlib import Path
 
 import pytest
 
-from mgit.core.repo import Repo, add_repo_from_path, add_repo_from_url
-from mgit.core.workspace import Workspace
+from mgit.core.repo import Repo, add_repo_from_path
 from mgit.core import git
-from mgit.models.types import RepoInfo
 
 
 class TestRepo:

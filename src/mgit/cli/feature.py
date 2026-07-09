@@ -24,7 +24,7 @@ def _print_setup_status(ws, fm, repo_name, wt_path):
     click.echo(f"    Running setup: {repo_info.setup}")
     ok, output = fm.run_setup(repo_name, wt_path)
     if ok:
-        click.echo(f"    Setup complete.")
+        click.echo("    Setup complete.")
     else:
         click.secho(f"    Setup failed: {output}", fg="yellow", err=True)
 

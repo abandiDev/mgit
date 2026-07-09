@@ -1,8 +1,6 @@
 """Shared test fixtures for mgit."""
 
-import os
 import subprocess
-from pathlib import Path
 
 import pytest
 

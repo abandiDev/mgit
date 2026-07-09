@@ -1,6 +1,5 @@
 """Tests for per-feature working memory: state, journal, brief, fork, validation."""
 
-import json
 
 import pytest
 

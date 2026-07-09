@@ -1,6 +1,5 @@
 """Tests for bulk operations and parallel execution."""
 
-import pytest
 
 from mgit.core.repo import Repo
 from mgit.models.types import BulkResult, OpStatus, RepoOpResult

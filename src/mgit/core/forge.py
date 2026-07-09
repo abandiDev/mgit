@@ -69,7 +69,7 @@ class GitHubForge:
         try:
             prs = json.loads(result.stdout or "[]")
         except json.JSONDecodeError:
-            raise MgitError(f"gh pr list returned unparsable output")
+            raise MgitError("gh pr list returned unparsable output")
         if not prs:
             return None
         pr = prs[0]

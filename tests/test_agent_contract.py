@@ -8,7 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from mgit.cli import cli, main
-from mgit.core import git, memory
+from mgit.core import memory
 from mgit.core.feature import FeatureManager
 from mgit.utils import output
 
@@ -261,10 +261,10 @@ class TestTreeCommand:
         result = runner.invoke(main, ["feature", "tree"])
         assert result.exit_code == 0
         lines = result.output.splitlines()
-        assert any("parent" in l and "└─" not in l for l in lines)
-        assert any("└─ child" in l for l in lines)
+        assert any("parent" in line and "└─" not in line for line in lines)
+        assert any("└─ child" in line for line in lines)
         # Active marker on the child (fork switches to it)
-        assert any(l.startswith("* ") and "child" in l for l in lines)
+        assert any(line.startswith("* ") and "child" in line for line in lines)
 
     def test_tree_json(self, initialized_workspace, runner, monkeypatch):
         ws = initialized_workspace

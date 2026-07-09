@@ -407,10 +407,8 @@ class Workspace:
         for name, repo_info in self.repos.items():
             repo_abs = (self.root / repo_info.path).resolve()
             try:
-                rel = target.relative_to(repo_abs)
-                depth = len(rel.parts)
-                # depth 0 means cwd IS the repo root; more parts = deeper
-                # We want the deepest match (most specific repo path)
+                target.relative_to(repo_abs)  # raises unless cwd is inside this repo
+                # Prefer the deepest match — the most specific repo path.
                 if best_match is None or len(repo_abs.parts) > best_depth:
                     best_match = name
                     best_depth = len(repo_abs.parts)
