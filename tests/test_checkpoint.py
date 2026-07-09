@@ -152,7 +152,7 @@ class TestCheckpointCleanup:
         cp = cm.save(fm, "feat")
         origin = ws.root / "repo-a"
 
-        fm.delete("feat")
+        fm.delete("feat", force=True)  # worktree is dirty by design here
 
         assert not (ws.checkpoints_dir / "feat").exists()
         assert git.run_git(

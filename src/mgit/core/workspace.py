@@ -21,6 +21,11 @@ CHECKPOINTS_DIR = "checkpoints"
 SKILLS_DIR = "skills"
 ACTIVE_FILE = "active"
 
+# AGENTS.md is a shared standard: frameworks (Next.js) and users write to it too.
+# mgit owns only what lies between these markers, so tools can coexist in one file.
+MGIT_BLOCK_BEGIN = "<!-- BEGIN:mgit -->"
+MGIT_BLOCK_END = "<!-- END:mgit -->"
+
 AGENT_MD_TEMPLATE = """\
 # mgit Workspace
 
@@ -150,6 +155,36 @@ moves it. To stay isolated:
 - Git is the source of truth for code state — mgit never stores dirty flags or
   ahead counts, it computes them live
 """
+
+
+def _mgit_block() -> str:
+    """mgit's guidance, fenced by sentinels so other tools can share the file."""
+    return f"{MGIT_BLOCK_BEGIN}\n{AGENT_MD_TEMPLATE.strip()}\n{MGIT_BLOCK_END}"
+
+
+def _split_block(text: str) -> tuple[str, str] | None:
+    """(before, after) around mgit's block, or None when it isn't present."""
+    start = text.find(MGIT_BLOCK_BEGIN)
+    end = text.find(MGIT_BLOCK_END)
+    if start == -1 or end == -1 or end < start:
+        return None
+    return text[:start], text[end + len(MGIT_BLOCK_END):]
+
+
+def _replace_block(text: str) -> str:
+    parts = _split_block(text)
+    if parts is None:
+        return text
+    before, after = parts
+    return before + _mgit_block() + after
+
+
+def _strip_block(text: str) -> str:
+    parts = _split_block(text)
+    if parts is None:
+        return text
+    before, after = parts
+    return before.rstrip("\n") + ("\n" + after.lstrip("\n") if after.strip() else "")
 
 
 class Workspace:
@@ -317,27 +352,43 @@ class Workspace:
         if active_path.exists():
             active_path.unlink()
 
-    def write_agent_md(self, backup: bool = False) -> list[str]:
-        """Write AGENT.md and AGENTS.md from the current template.
+    def write_agent_md(self) -> list[tuple[str, str]]:
+        """Install mgit's guidance into AGENT.md and AGENTS.md.
 
-        With backup=True, a locally modified AGENT.md is copied to
-        AGENT.md.bak before being overwritten (used by 'mgit upgrade').
+        AGENTS.md is a cross-tool standard — Next.js, other frameworks, and the
+        user all write to it. mgit therefore owns only the region between its
+        sentinels and merges into whatever else is there, rather than replacing
+        the file. Rewriting is idempotent, and foreign content is never lost.
 
-        Returns the names of the files written.
+        Returns (filename, action) where action is created | updated | merged.
         """
-        written = []
+        results: list[tuple[str, str]] = []
         for fname in ("AGENT.md", "AGENTS.md"):
             path = self.root / fname
-            if backup and path.exists() and path.read_text() != AGENT_MD_TEMPLATE:
-                (self.root / f"{fname}.bak").write_text(path.read_text())
-            path.write_text(AGENT_MD_TEMPLATE)
-            written.append(fname)
-        return written
+            if not path.exists():
+                path.write_text(_mgit_block() + "\n")
+                results.append((fname, "created"))
+                continue
+
+            existing = path.read_text()
+            if MGIT_BLOCK_BEGIN in existing and MGIT_BLOCK_END in existing:
+                path.write_text(_replace_block(existing))
+                results.append((fname, "updated"))
+            elif existing.strip() == AGENT_MD_TEMPLATE.strip():
+                # Written by an older mgit, before sentinels existed.
+                path.write_text(_mgit_block() + "\n")
+                results.append((fname, "updated"))
+            else:
+                path.write_text(existing.rstrip("\n") + "\n\n" + _mgit_block() + "\n")
+                results.append((fname, "merged"))
+        return results
 
     def remove(self) -> None:
-        """Remove the mgit workspace metadata (.mgit/, AGENT.md, AGENTS.md).
+        """Remove the mgit workspace metadata (.mgit/ and mgit's agent guidance).
 
-        Only removes mgit's own files — repos and other user files are untouched.
+        Only removes mgit's own content — repos and other user files are
+        untouched. An AGENTS.md that also holds foreign content keeps that
+        content; only mgit's sentinel block is stripped.
         """
         import shutil
 
@@ -346,8 +397,18 @@ class Workspace:
 
         for fname in ("AGENT.md", "AGENTS.md"):
             agent_md = self.root / fname
-            if agent_md.exists():
-                agent_md.unlink()
+            if not agent_md.exists():
+                continue
+            text = agent_md.read_text()
+            if MGIT_BLOCK_BEGIN in text and MGIT_BLOCK_END in text:
+                rest = _strip_block(text).strip()
+                if rest:
+                    agent_md.write_text(rest + "\n")
+                else:
+                    agent_md.unlink()
+            elif text.strip() == AGENT_MD_TEMPLATE.strip():
+                agent_md.unlink()  # legacy pre-sentinel mgit file
+            # else: not ours — leave it alone
 
     def detect_feature_from_cwd(self, cwd: Path | None = None) -> str | None:
         """Feature whose worktree tree contains cwd, or None.

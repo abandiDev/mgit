@@ -282,6 +282,17 @@ def add_repo_from_path(
     if not git.is_git_repo(local_path):
         raise ValueError(f"{local_path} is not a git repository")
 
+    # A workspace holds repos beside it, never itself: linking the root in would
+    # create workspace/<name> -> workspace, a self-referential symlink that lands
+    # untracked inside the very repo it points at.
+    root = workspace_root.resolve()
+    if local_path == root or local_path in root.parents:
+        raise ValueError(
+            f"{local_path} contains the workspace at {root} — a workspace cannot "
+            f"register itself or an ancestor. Create the workspace in a parent "
+            f"directory of your repos."
+        )
+
     repo_name = name or local_path.name
     link_path = workspace_root / repo_name
 

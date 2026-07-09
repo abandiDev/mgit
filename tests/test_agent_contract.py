@@ -281,12 +281,14 @@ class TestTreeCommand:
 
 
 class TestUpgrade:
-    def test_upgrade_regenerates_and_backs_up(self, initialized_workspace, runner, monkeypatch):
+    def test_upgrade_regenerates_and_preserves_foreign_content(
+        self, initialized_workspace, runner, monkeypatch
+    ):
         ws = initialized_workspace
         monkeypatch.chdir(ws.root)
         FeatureManager(ws).start("feat", ["repo-a"])
 
-        # Simulate a pre-upgrade workspace: modified AGENT.md, no AGENTS.md,
+        # Simulate a pre-upgrade workspace: a hand-written AGENT.md, no AGENTS.md,
         # no ambient brief files
         (ws.root / "AGENT.md").write_text("old customized content")
         (ws.root / "AGENTS.md").unlink()
@@ -296,9 +298,10 @@ class TestUpgrade:
         result = runner.invoke(main, ["upgrade"])
         assert result.exit_code == 0
 
-        assert "Working Memory" in (ws.root / "AGENT.md").read_text()
+        agent_md = (ws.root / "AGENT.md").read_text()
+        assert "Working Memory" in agent_md          # mgit's block installed
+        assert "old customized content" in agent_md  # ...without eating theirs
         assert (ws.root / "AGENTS.md").exists()
-        assert (ws.root / "AGENT.md.bak").read_text() == "old customized content"
         assert (ws.worktrees_dir / "feat" / "CLAUDE.md").exists()
 
     def test_init_writes_both_agent_files(self, workspace_with_repos):

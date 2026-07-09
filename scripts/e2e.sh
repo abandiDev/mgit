@@ -29,6 +29,7 @@ else
     PY="${PY:-python3}"
 fi
 
+RESCUE_GLOB="refs/mgit/rescue/**"
 SANDBOX="$(mktemp -d -t mgit-e2e-XXXXXX)"
 trap 'rm -rf "$SANDBOX"' EXIT
 WS="$SANDBOX/workspace"
@@ -303,14 +304,33 @@ json_check "deep context has live repo facts" \
 section "upgrade + delete cleanup"
 echo custom >> AGENT.md
 check "mgit upgrade" "$MGIT" upgrade
-check "AGENT.md.bak preserved" grep -q custom AGENT.md.bak
-check "delete child feature" "$MGIT" feature delete pay-flow-v2
-check "delete parent feature" "$MGIT" feature delete pay-flow
+check "upgrade merges, never clobbers AGENT.md" grep -q custom AGENT.md
+check "upgrade installs mgit's block" grep -q 'BEGIN:mgit' AGENT.md
+
+# These features hold unmerged sandbox commits: delete must refuse, not destroy.
+expect_exit "delete refuses unsaved work (non-TTY)" 2 "$MGIT" feature delete pay-flow-v2
+check "refused feature still exists" "$MGIT" feature show pay-flow-v2
+
+check "delete child feature" "$MGIT" feature delete pay-flow-v2 --force
+check "delete parent feature" "$MGIT" feature delete pay-flow --force
 check "worktrees cleaned" test ! -d .mgit/worktrees/pay-flow
 check "memory sidecar cleaned" test ! -d .mgit/features/pay-flow
 check "checkpoints cleaned" test ! -d .mgit/checkpoints/pay-flow
-REFS=$(git -C svc-api for-each-ref refs/mgit/ | wc -l)
-[ "$REFS" -eq 0 ] && ok "all refs/mgit/* pruned" || fail "all refs/mgit/* pruned ($REFS left)"
+
+# Forced deletion is recoverable: rescue refs pin the destroyed worktrees, and
+# nothing else under refs/mgit/ survives.
+RESCUE=$(git -C svc-api for-each-ref "$RESCUE_GLOB" | wc -l)
+[ "$RESCUE" -gt 0 ] && ok "forced delete pinned rescue refs" \
+    || fail "forced delete pinned rescue refs (none found)"
+OTHER=$(git -C svc-api for-each-ref refs/mgit/ | grep -vc "refs/mgit/rescue/" || true)
+[ "$OTHER" -eq 0 ] && ok "all non-rescue refs/mgit/* pruned" \
+    || fail "all non-rescue refs/mgit/* pruned ($OTHER left)"
+
+# The rescue must outlive the gc that used to destroy this work.
+git -C svc-api gc --prune=now --quiet
+RESCUE_AFTER=$(git -C svc-api for-each-ref "$RESCUE_GLOB" | wc -l)
+[ "$RESCUE_AFTER" -eq "$RESCUE" ] && ok "rescue refs survive git gc --prune=now" \
+    || fail "rescue refs survive git gc --prune=now"
 
 # ---------- summary ----------
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

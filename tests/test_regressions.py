@@ -195,7 +195,7 @@ class TestSandboxBranchCleanup:
         (wt / "secret-old-work.txt").write_text("x")
         git.run_git("add", "-A", cwd=wt)
         git.run_git("commit", "-m", "old feature commit", cwd=wt)
-        fm.delete("feat")
+        fm.delete("feat", force=True)  # unmerged sandbox commit by design here
 
         fm.start("feat", ["repo-a"])
         wt2 = fm.materialize("feat", "repo-a")

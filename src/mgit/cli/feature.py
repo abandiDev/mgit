@@ -15,11 +15,41 @@ from mgit.core.workspace import Workspace
 from mgit.utils import output
 from mgit.utils.errors import MgitError
 
+# A worktree starts with no ignored files, so dependencies installed in the
+# origin repo (node_modules, .venv) are absent and the project won't run there.
+# Lockfiles first: they identify the package manager more precisely.
+_DEP_MANIFESTS = (
+    ("pnpm-lock.yaml", "pnpm install"),
+    ("yarn.lock", "yarn install"),
+    ("package.json", "npm install"),
+    ("requirements.txt", "pip install -r requirements.txt"),
+    ("pyproject.toml", "pip install -e ."),
+    ("Cargo.toml", "cargo fetch"),
+    ("go.mod", "go mod download"),
+)
+
+
+def _warn_missing_setup(repo_name, wt_path):
+    """Nudge toward a setup command when a worktree has uninstalled deps."""
+    for manifest, suggestion in _DEP_MANIFESTS:
+        if (wt_path / manifest).exists():
+            click.secho(
+                f"    {manifest} present but no setup command — this worktree has "
+                f"no installed dependencies.",
+                fg="yellow",
+            )
+            click.secho(
+                f'    Configure once: mgit repo setup {repo_name} "{suggestion}"',
+                fg="yellow",
+            )
+            return
+
 
 def _print_setup_status(ws, fm, repo_name, wt_path):
     """Print setup command result for a repo if configured."""
     repo_info = ws.get_repo(repo_name)
     if not repo_info.setup:
+        _warn_missing_setup(repo_name, wt_path)
         return
     click.echo(f"    Running setup: {repo_info.setup}")
     ok, output = fm.run_setup(repo_name, wt_path)
@@ -360,25 +390,63 @@ def list_features():
         click.echo(f"{marker}{f.name}{desc}  [{repos}]")
 
 
+def _confirm_destroy(action: str, risky: list[tuple[str, str]]) -> bool:
+    """Confirm destroying at-risk worktrees. Non-TTY sessions must pass --force."""
+    if not risky:
+        return True
+    click.echo(f"{action} would destroy work that is not committed or merged:")
+    for name, why in risky:
+        click.echo(f"  {name}: {why}")
+    click.echo("A rescue snapshot will be pinned first (see 'mgit upgrade').")
+    if not sys.stdin.isatty():
+        raise MgitError(
+            "Non-interactive session — re-run with --force to proceed."
+        )
+    return click.confirm("Continue?", default=False)
+
+
+def _echo_rescued(rescued: list[str]) -> None:
+    if not rescued:
+        return
+    click.echo("Rescue snapshots pinned (recover with 'git checkout <ref> -- .'):")
+    for line in rescued:
+        click.echo(f"  {line}")
+
+
 @feature.command("delete")
 @click.argument("name")
-def delete(name):
-    """Delete a feature definition and clean up its worktrees."""
+@click.option("--force", is_flag=True, help="Delete even if worktrees hold unsaved work.")
+def delete(name, force):
+    """Delete a feature: worktrees, sandbox branches, memory, checkpoints."""
     ws = Workspace.find()
     fm = FeatureManager(ws)
-    fm.delete(name)
+    if not force and not _confirm_destroy(f"Deleting '{name}'", fm.at_risk_repos(name)):
+        click.echo("Aborted.")
+        return
+    rescued = fm.delete(name, force=True)
     click.echo(f"Deleted feature '{name}'.")
+    _echo_rescued(rescued)
 
 
 @feature.command("remove-repo")
 @click.argument("feature_name")
 @click.argument("repo_name")
-def remove_repo(feature_name, repo_name):
-    """Remove a repo from a feature and clean up its worktree."""
+@click.option("--force", is_flag=True, help="Remove even if the worktree holds unsaved work.")
+def remove_repo(feature_name, repo_name, force):
+    """Remove a repo from a feature: destroys its worktree and sandbox branch."""
     ws = Workspace.find()
     fm = FeatureManager(ws)
-    fm.remove_repo(feature_name, repo_name)
-    click.echo(f"Removed '{repo_name}' from feature '{feature_name}'.")
+    if not force:
+        risky = [(r, w) for r, w in fm.at_risk_repos(feature_name) if r == repo_name]
+        if not _confirm_destroy(f"Removing '{repo_name}'", risky):
+            click.echo("Aborted.")
+            return
+    _, rescued = fm.remove_repo(feature_name, repo_name, force=True)
+    click.echo(
+        f"Removed '{repo_name}' from feature '{feature_name}' "
+        f"(worktree and sandbox branch deleted)."
+    )
+    _echo_rescued(rescued)
 
 
 # --- Working memory ---

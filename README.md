@@ -318,8 +318,8 @@ mgit push -f .
 | `mgit feature list` | List all features (`*` marks active) |
 | `mgit feature publish [--title T] [--draft] [--json]` | Push + open linked PRs/MRs (gh/glab auto-detected per repo) |
 | `mgit feature checks [--json]` | CI/review/merge status of the feature's PRs across repos |
-| `mgit feature delete <name>` | Delete a feature: worktrees, memory, checkpoints, refs |
-| `mgit feature remove-repo <feature> <repo>` | Remove a repo from a feature |
+| `mgit feature delete <name> [--force]` | Delete a feature: worktrees, sandbox branches, memory, checkpoints. Refuses if a worktree holds uncommitted or unmerged work |
+| `mgit feature remove-repo <feature> <repo> [--force]` | Remove a repo from a feature — **destroys its worktree and sandbox branch**; same refusal as `delete` |
 
 ### Working memory
 
@@ -379,9 +379,12 @@ All bulk commands support:
 - **Memory sidecar**: plan + journal live at `.mgit/features/<feature>/` (plain TOML/JSONL); the journal is append-only
 - **Forks**: lineage (`parent`, pinned `fork_base` SHAs) lives in the feature file, never in branch names; forked children push to their own remote branch by default
 - **Checkpoints**: manifests at `.mgit/checkpoints/<feature>/`, snapshots pinned by `refs/mgit/checkpoint/...` (gc-immune, never pushed)
+- **Nothing destroys work silently**: `feature delete` and `feature remove-repo` refuse when a worktree has uncommitted changes or unmerged sandbox commits. Pass `--force` and mgit first pins everything — tracked, staged, and untracked — to `refs/mgit/rescue/<feature>/<repo>` in the origin repo. That ref is gc-immune, survives the worktree, and is the one thing `mgit upgrade --fix` will never delete. Recover with `git checkout <ref> -- .`, release with `git update-ref -d <ref>`
+- **Agent files are shared**: `AGENTS.md` is a cross-tool standard (Next.js and others write to it). mgit owns only the region between `<!-- BEGIN:mgit -->` and `<!-- END:mgit -->`, merging into whatever else is in the file and never overwriting it. `mgit remove` strips that block and leaves the rest
+- **Worktrees start without ignored files**: a materialized worktree has no `node_modules` or `.venv`. When mgit sees a dependency manifest and no setup command, it says so and suggests `mgit repo setup <repo> "<install cmd>"`
 - **One agent per feature**: the plan file is last-writer-wins (the journal preserves overwritten history); fork a variant instead of sharing a feature
 - **Skills**: everything under `.mgit/skills/` — `drafts/` awaiting review, `active/` advertised in the ambient brief, plus `parked.jsonl` (n=1 candidates), `tombstones.jsonl` (rejected, never re-proposed), `ledger.jsonl` (decisions). Only `mgit skill approve` makes a skill visible to agents
-- **Upgrading from an older mgit**: behavior fixes apply the moment the binary is upgraded — on-disk state is additive and lazy, old feature files load unchanged. Run `mgit upgrade` once per workspace: it refreshes AGENT.md/AGENTS.md and the ambient briefs, then health-checks for state older versions left behind (bogus repo registrations, orphaned sandbox branches/refs of deleted features, mixed target branches, orphaned sidecars); `mgit upgrade --fix` applies the mechanical repairs and reports the rest with manual remedies. Only behavior change: usage errors now exit `3` (was `1`), and carry prompts refuse non-TTY sessions instead of hanging
+- **Upgrading from an older mgit**: behavior fixes apply the moment the binary is upgraded — on-disk state is additive and lazy, old feature files load unchanged. Run `mgit upgrade` once per workspace: it refreshes mgit's block in AGENT.md/AGENTS.md and the ambient briefs, then health-checks for state older versions left behind (bogus repo registrations, orphaned sandbox branches/refs of deleted features, mixed target branches, orphaned sidecars); `mgit upgrade --fix` applies the mechanical repairs and reports the rest with manual remedies. Behavior changes: usage errors now exit `3` (was `1`); carry prompts refuse non-TTY sessions instead of hanging; `feature delete`/`remove-repo` refuse to destroy unsaved work without `--force`; and an `AGENTS.md` you or another tool wrote is merged into rather than overwritten
 
 ## Requirements
 

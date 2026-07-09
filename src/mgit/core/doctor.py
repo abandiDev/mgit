@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from mgit.core import git
-from mgit.core.feature import FeatureManager
+from mgit.core.feature import RESCUE_REF_PREFIX, FeatureManager
 from mgit.core.repo import Repo
 from mgit.core.workspace import Workspace
 
@@ -109,6 +109,18 @@ def run_checks(ws: Workspace) -> list[Finding]:
             parts = ref.split("/")
             ref_feature = parts[3] if len(parts) > 3 else None
             if not ref_feature or ref_feature in feature_names:
+                continue
+
+            # A rescue ref is the last copy of work a destroyed worktree held.
+            # Report it, never offer to delete it — `--fix` must not be the
+            # thing that finally loses what the rescue existed to preserve.
+            if ref.startswith(f"{RESCUE_REF_PREFIX}/"):
+                findings.append(Finding(
+                    f"{name}: rescue snapshot '{ref}' holds work from deleted "
+                    f"feature '{ref_feature}' — recover it with "
+                    f"'git -C {path} checkout {ref} -- .', then release it with "
+                    f"'git -C {path} update-ref -d {ref}'"
+                ))
                 continue
 
             def _delete_ref(r: Repo = repo, rf: str = ref) -> None:

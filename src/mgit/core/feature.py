@@ -42,6 +42,17 @@ def sandbox_branch(feature_name: str) -> str:
     return f"mgit/{feature_name}"
 
 
+# Removing a worktree destroys whatever is in it. Before that happens the tree
+# is pinned here, in the origin repo's shared ref store: gc-immune, survives
+# the worktree, and — unlike checkpoint refs — NOT swept by feature deletion.
+RESCUE_REF_PREFIX = "refs/mgit/rescue"
+
+
+def rescue_ref(feature_name: str, repo_name: str) -> str:
+    """Ref pinning a worktree's last state before mgit destroyed it."""
+    return f"{RESCUE_REF_PREFIX}/{feature_name}/{repo_name}"
+
+
 def find_dirty_repos(ws: Workspace, repo_names: list[str]) -> list[tuple[str, str]]:
     """Find repos with uncommitted changes.
 
@@ -108,11 +119,110 @@ class FeatureManager:
         )
         return feature
 
-    def delete(self, name: str) -> None:
-        """Delete a feature definition and clean up its worktrees."""
+    def _unmerged_count(self, wt_path: Path, base: str) -> int | None:
+        """Sandbox commits not reachable from `base`.
+
+        None when base can't be resolved — treated as at-risk, because "I could
+        not check" must never read as "there is nothing here".
+        """
+        result = git.run_git(
+            "rev-list", "--count", f"{base}..HEAD", cwd=wt_path, check=False
+        )
+        if result.returncode != 0:
+            return None
+        try:
+            return int(result.stdout.strip())
+        except ValueError:
+            return None
+
+    def at_risk_repos(self, feature_name: str) -> list[tuple[str, str]]:
+        """Repos whose worktree holds work that removing it would orphan.
+
+        Two ways to lose work: an uncommitted (or untracked) worktree, and
+        sandbox commits that exist on no other branch. The base for that second
+        check is where the sandbox branched from — the pinned fork base, else
+        the repo's default branch. Note feature.branches[repo] is the *target*
+        (publish) branch, which typically has no local ref; it is not the base.
+        """
+        feature = self.get(feature_name)
+        at_risk: list[tuple[str, str]] = []
+        for repo_name in feature.branches:
+            if repo_name not in self.ws.repos:
+                continue
+            wt_path = self.ws.worktree_path(feature_name, repo_name)
+            if not wt_path.exists():
+                continue
+            repo_info = self.ws.get_repo(repo_name)
+            try:
+                wt_repo = Repo.at_worktree(wt_path, repo_info)
+            except Exception:
+                continue
+            reasons = []
+            if wt_repo.is_dirty():
+                reasons.append("uncommitted changes")
+            base = feature.fork_base.get(repo_name) or repo_info.default_branch
+            unmerged = self._unmerged_count(wt_path, base)
+            if unmerged is None:
+                reasons.append(f"merge status vs '{base}' unverifiable")
+            elif unmerged:
+                reasons.append(f"{unmerged} unmerged commit(s)")
+            if reasons:
+                at_risk.append((repo_name, " and ".join(reasons)))
+        return at_risk
+
+    def rescue_worktree(self, feature_name: str, repo_name: str) -> str | None:
+        """Pin a worktree's full state to a gc-immune ref before destroying it.
+
+        snapshot_commit() captures staged + unstaged + untracked via a temp
+        index, and returns HEAD unchanged when the tree is clean — so this ref
+        keeps unmerged sandbox commits reachable either way. Returns the ref.
+        """
+        wt_path = self.ws.worktree_path(feature_name, repo_name)
+        if not wt_path.exists() or repo_name not in self.ws.repos:
+            return None
+        try:
+            wt_repo = Repo.at_worktree(wt_path, self.ws.get_repo(repo_name))
+            if wt_repo.rev_parse("HEAD") is None:
+                return None
+            sha = wt_repo.snapshot_commit(f"mgit rescue {feature_name}/{repo_name}")
+            origin = Repo(self.ws.get_repo(repo_name), self.ws.root)
+            ref = rescue_ref(feature_name, repo_name)
+            origin.update_ref(ref, sha)
+            return ref
+        except Exception:
+            return None
+
+    def _guard_and_rescue(
+        self, feature_name: str, force: bool, only_repo: str | None = None
+    ) -> StrList:
+        """Refuse to destroy at-risk worktrees unless forced; always rescue first."""
+        risky = self.at_risk_repos(feature_name)
+        if only_repo is not None:
+            risky = [(r, why) for r, why in risky if r == only_repo]
+        if risky and not force:
+            detail = "; ".join(f"{r} ({why})" for r, why in risky)
+            raise MgitError(
+                f"Refusing to destroy work in feature '{feature_name}': {detail}. "
+                f"Commit or push it, or re-run with --force — mgit pins a rescue "
+                f"snapshot before removing either way."
+            )
+        rescued = []
+        for repo_name, _ in risky:
+            ref = self.rescue_worktree(feature_name, repo_name)
+            if ref:
+                rescued.append(f"{repo_name}: {ref}")
+        return rescued
+
+    def delete(self, name: str, force: bool = False) -> StrList:
+        """Delete a feature definition and clean up its worktrees.
+
+        Returns the rescue refs pinned for any worktree that held work.
+        """
         path = self._feature_path(name)
         if not path.exists():
             raise FeatureNotFoundError(f"Feature '{name}' not found")
+
+        rescued = self._guard_and_rescue(name, force)
 
         # Remove worktrees for all enrolled repos
         feature = self.get(name)
@@ -160,6 +270,8 @@ class FeatureManager:
         if self.ws.get_active_feature() == name:
             self.ws.clear_active_feature()
 
+        return rescued
+
     def get(self, name: str) -> FeatureInfo:
         """Load a feature by name."""
         path = self._feature_path(name)
@@ -180,13 +292,22 @@ class FeatureManager:
             features.append(config.dict_to_feature(data))
         return features
 
-    def remove_repo(self, feature_name: str, repo_name: str) -> FeatureInfo:
-        """Remove a repo from a feature and clean up its worktree."""
+    def remove_repo(
+        self, feature_name: str, repo_name: str, force: bool = False
+    ) -> tuple[FeatureInfo, StrList]:
+        """Remove a repo from a feature and clean up its worktree.
+
+        Despite the name this is destructive: it force-removes the worktree and
+        force-deletes the sandbox branch. Guarded like delete(); returns the
+        feature and any rescue refs pinned.
+        """
         feature = self.get(feature_name)
         if repo_name not in feature.branches:
             raise RepoNotFoundError(
                 f"Repo '{repo_name}' not in feature '{feature_name}'"
             )
+
+        rescued = self._guard_and_rescue(feature_name, force, only_repo=repo_name)
 
         # Remove worktree
         wt_path = self.ws.worktree_path(feature_name, repo_name)
@@ -220,7 +341,7 @@ class FeatureManager:
             event="repo_removed", repo=repo_name,
         )
         self._regen_brief(feature)
-        return feature
+        return feature, rescued
 
     def run_setup(self, repo_name: str, cwd: Path) -> tuple[bool, str]:
         """Run the configured setup command for a repo.

@@ -59,7 +59,7 @@ def init(name, no_interactive):
     click.echo("Workspace ready! Here's what you can do next:")
     click.echo()
     click.echo("  mgit repo add <url>              Clone another repo into this workspace")
-    click.echo("  mgit feature create <name>       Start a new cross-repo feature")
+    click.echo("  mgit feature start <name>        Start a new cross-repo feature")
     click.echo("  mgit status                      See status across all repos")
     click.echo("  mgit --help                      See all commands")
     click.echo()
@@ -100,7 +100,7 @@ def remove(force):
     if not force:
         click.echo(f"This will remove the mgit workspace at {ws.root}")
         click.echo("  - Deletes .mgit/ (config, features, active state)")
-        click.echo("  - Deletes AGENT.md")
+        click.echo("  - Strips mgit's block from AGENT.md / AGENTS.md")
         click.echo("  - Repos and other files are NOT touched")
         if not click.confirm("Continue?"):
             click.echo("Aborted.")
@@ -133,10 +133,13 @@ def upgrade(apply_fix):
     ws = Workspace.find()
     fm = FeatureManager(ws)
 
-    written = ws.write_agent_md(backup=True)
-    click.echo(f"Regenerated {', '.join(written)} in {ws.root}.")
-    if (ws.root / "AGENT.md.bak").exists():
-        click.echo("  (previous AGENT.md backed up to AGENT.md.bak)")
+    results = ws.write_agent_md()
+    click.echo(
+        f"Refreshed {', '.join(f'{n} ({a})' for n, a in results)} in {ws.root}."
+    )
+    for name, action in results:
+        if action == "merged":
+            click.echo(f"  ({name} had other content; mgit's block was appended)")
 
     count = 0
     for feat in fm.list():
