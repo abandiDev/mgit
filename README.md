@@ -232,8 +232,10 @@ Distillation shells out to the `claude` CLI in headless mode (configurable under
 `[skills]` in `.mgit/config.toml`), and journal text is scrubbed for secret
 shapes before it leaves the machine. A draft's `verify_command` is written by an
 LLM from journal content, so it is **never executed during distill** — it runs
-under your eye at `mgit skill approve --run-verify`, unless you opt in to
-`allow-auto-verify`.
+under your eye at `mgit skill approve --run-verify`, which prints the command and
+the directory and asks before executing it (`--yes` to skip the prompt). It runs
+in the repo the skill was learned in, not the workspace root. Opt in to
+`allow-auto-verify` only if you accept unattended execution.
 
 ## Agent workflow
 
@@ -345,7 +347,7 @@ mgit push -f .
 | `mgit skill distill [-f NAME] [--dry-run] [--json]` | Mine durable skills from journals; `--dry-run` prints the prompt and calls nothing |
 | `mgit skill drafts [--json]` | List drafts awaiting review |
 | `mgit skill show <slug> [--json]` | Print a draft's full SKILL.md |
-| `mgit skill approve <slug> [--run-verify] [--json]` | Promote a draft into the active set; `--run-verify` refuses approval if its `verify_command` fails |
+| `mgit skill approve <slug> [--run-verify] [--yes] [--json]` | Promote a draft into the active set; `--run-verify` refuses approval if its `verify_command` fails. The command is LLM-authored shell, so it is shown and confirmed first — `--yes` to skip the prompt |
 | `mgit skill reject <slug> --reason TEXT [--json]` | Tombstone a draft so it is never re-proposed |
 | `mgit skill list [--json]` | List active skills advertised in the ambient brief |
 | `mgit skill doctor [--json]` | Health report: active skills, drafts, parked backlog |

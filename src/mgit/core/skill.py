@@ -835,6 +835,19 @@ class SkillManager:
         _ledger_append(ws, {"type": "reject", "slug": slug, "reason": reason})
         shutil.rmtree(draft_dir)
 
+    def pending_verify(self, slug: str) -> tuple[str, Path] | None:
+        """The (command, cwd) a --run-verify would execute, without running it.
+
+        The command is written by an LLM from journal text, so the human must be
+        able to read it before it runs as shell in their repo.
+        """
+        ws = self.ws
+        meta = read_meta(_drafts_dir(ws) / slug)
+        command = meta.get("verify_command")
+        if not command or not meta.get("verify_pending"):
+            return None
+        return str(command), verify_cwd(ws, meta)
+
     # -- run a draft's pending verify with the human present --
     def run_pending_verify(self, slug: str) -> tuple[bool, str, Path] | None:
         ws, cfg = self.ws, self.cfg

@@ -433,3 +433,92 @@ class TestVerifyRunsInTheRepo:
         ok, _output, cwd = SkillManager(ws).run_pending_verify("cwd-rule")
         assert ok, "verify must run inside repo-a, where the marker lives"
         assert cwd == ws.repo_path("repo-a")
+
+
+class TestVerifyCommandNeedsConsent:
+    """`--run-verify` executes LLM-authored shell in a real repo. One live
+    distiller run wrote `git stash push … ; git stash pop`, which in a repo with
+    an unrelated stash would have popped it into the working tree."""
+
+    def _draft(self, ws, command):
+        from mgit.core import skill
+        from mgit.core.feature import FeatureManager
+
+        FeatureManager(ws).start("feat", ["repo-a"])
+        skill.render_draft(
+            ws,
+            {
+                "slug": "risky",
+                "kind": "durable-procedure",
+                "scope_level": "feature",
+                "trigger_description": "t",
+                "anti_triggers": ["never"],
+                "steps": ["s"],
+                "verify_command": command,
+                "evidence": [{"quote": "q", "kind": "decision"}],
+            },
+            features=["feat"],
+        )
+        skill.update_meta(ws.skills_dir / "drafts" / "risky", verify_pending=True)
+
+    def test_pending_verify_exposes_the_command_without_running_it(self, initialized_workspace):
+        from mgit.core.skill import SkillManager
+
+        ws = initialized_workspace
+        marker = ws.root / "ran.txt"
+        self._draft(ws, f"touch {marker}")
+
+        command, cwd = SkillManager(ws).pending_verify("risky")
+        assert "touch" in command
+        assert cwd == ws.repo_path("repo-a")
+        assert not marker.exists(), "inspecting the command must not execute it"
+
+    def test_non_tty_refuses_without_yes_and_does_not_execute(
+        self, initialized_workspace, monkeypatch
+    ):
+        from click.testing import CliRunner
+
+        from mgit.cli import main
+
+        ws = initialized_workspace
+        monkeypatch.chdir(ws.root)
+        marker = ws.root / "ran.txt"
+        self._draft(ws, f"touch {marker}")
+
+        result = CliRunner().invoke(main, ["skill", "approve", "risky", "--run-verify"])
+        assert result.exit_code != 0
+        assert not marker.exists(), "command must not run without consent"
+        assert (ws.skills_dir / "drafts" / "risky").is_dir(), "draft must survive"
+
+    def test_json_mode_does_not_imply_consent(self, initialized_workspace, monkeypatch):
+        from click.testing import CliRunner
+
+        from mgit.cli import main
+
+        ws = initialized_workspace
+        monkeypatch.chdir(ws.root)
+        marker = ws.root / "ran.txt"
+        self._draft(ws, f"touch {marker}")
+
+        result = CliRunner().invoke(
+            main, ["skill", "approve", "risky", "--run-verify", "--json"]
+        )
+        assert result.exit_code != 0
+        assert not marker.exists()
+
+    def test_yes_executes_and_approves(self, initialized_workspace, monkeypatch):
+        from click.testing import CliRunner
+
+        from mgit.cli import main
+
+        ws = initialized_workspace
+        monkeypatch.chdir(ws.root)
+        marker = ws.repo_path("repo-a") / "ran.txt"
+        self._draft(ws, "touch ran.txt")
+
+        result = CliRunner().invoke(
+            main, ["skill", "approve", "risky", "--run-verify", "--yes"]
+        )
+        assert result.exit_code == 0, result.output
+        assert marker.exists(), "with --yes the command runs, in the repo"
+        assert (ws.skills_dir / "active" / "risky").is_dir()

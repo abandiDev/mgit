@@ -180,8 +180,16 @@ $MGIT skill distill >/dev/null 2>&1
 check "verify_command drafted, not executed" test ! -f "$MARKER"
 check "draft flagged verify-pending" bash -c \
     "grep -q 'verify_pending = true' .mgit/skills/drafts/typecheck-mgit/skill.toml"
-# --run-verify runs it under the human's hand; a passing command stamps + approves.
-check "approve --run-verify executes the command" "$MGIT" skill approve typecheck-mgit --run-verify
+# The command is LLM-authored shell: a headless --run-verify must refuse without
+# consent, and must not have executed anything.
+expect_exit "headless --run-verify refuses without --yes (exit 2)" 2 \
+    "$MGIT" skill approve typecheck-mgit --run-verify
+check "refused consent did not execute the command" test ! -f "$MARKER"
+check "draft survives a refused consent" test -d .mgit/skills/drafts/typecheck-mgit
+
+# --run-verify --yes runs it under the human's hand; a passing command stamps + approves.
+check "approve --run-verify --yes executes the command" \
+    "$MGIT" skill approve typecheck-mgit --run-verify --yes
 check "verify actually ran on explicit review" test -f "$MARKER"
 
 # A failing verify under --run-verify refuses approval (exit 2) and keeps the draft.
@@ -193,7 +201,7 @@ set_candidates '[
   "explicit_rule":false,"recurrence_of":null,"updates_existing_skill":null,"watched_paths":[]}]'
 $MGIT skill distill >/dev/null 2>&1
 expect_exit "failing --run-verify refuses approval (exit 2)" 2 \
-    "$MGIT" skill approve bad-check --run-verify
+    "$MGIT" skill approve bad-check --run-verify --yes
 check "refused draft stays a draft" test -d .mgit/skills/drafts/bad-check
 check "refused skill is not active" test ! -d .mgit/skills/active/bad-check
 
