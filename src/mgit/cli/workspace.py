@@ -1,16 +1,30 @@
 """CLI commands: mgit init, mgit remove, mgit upgrade."""
 
+import os
 from pathlib import Path
 
 import click
 
-from mgit.core.workspace import Workspace
+from mgit.core.workspace import Workspace, ephemeral_root
+from mgit.utils.errors import EphemeralWorkspaceError
+
+ALLOW_EPHEMERAL_ENV = "MGIT_ALLOW_EPHEMERAL"
+
+
+def _ephemeral_allowed(flag: bool) -> bool:
+    """Tests and e2e sandboxes init under /tmp on purpose."""
+    return flag or os.environ.get(ALLOW_EPHEMERAL_ENV, "") not in ("", "0")
 
 
 @click.command()
 @click.argument("name", required=False)
 @click.option("--no-interactive", is_flag=True, help="Auto-add all found repos without prompting.")
-def init(name, no_interactive):
+@click.option(
+    "--allow-ephemeral",
+    is_flag=True,
+    help="Init under a temp dir anyway. The working memory will not survive.",
+)
+def init(name, no_interactive, allow_ephemeral):
     """Initialize a new mgit workspace.
 
     If NAME is given, creates a new directory with that name.
@@ -20,6 +34,17 @@ def init(name, no_interactive):
         path = Path.cwd() / name
     else:
         path = Path.cwd()
+
+    # Refuse before anything is written. A workspace under /tmp looks like every
+    # other workspace until the day its journal is gone.
+    root = ephemeral_root(path)
+    if root and not _ephemeral_allowed(allow_ephemeral):
+        raise EphemeralWorkspaceError(
+            f"Refusing to create a workspace under {root}, which the OS reaps.\n"
+            f"  .mgit/ would hold the only copy of every feature's working memory\n"
+            f"  (memory.toml, journal.jsonl); a reboot or a tmp sweep destroys it.\n"
+            f"  Pick a durable path, or pass --allow-ephemeral if it is throwaway."
+        )
 
     ws, found_repos = Workspace.init(path, name=name, scan=True, auto_add=False)
 

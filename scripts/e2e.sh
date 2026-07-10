@@ -32,6 +32,8 @@ fi
 RESCUE_GLOB="refs/mgit/rescue/**"
 SANDBOX="$(mktemp -d -t mgit-e2e-XXXXXX)"
 trap 'rm -rf "$SANDBOX"' EXIT
+# This sandbox is throwaway on purpose; `mgit init` otherwise refuses /tmp.
+export MGIT_ALLOW_EPHEMERAL=1
 WS="$SANDBOX/workspace"
 mkdir -p "$WS"
 

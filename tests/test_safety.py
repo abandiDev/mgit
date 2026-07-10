@@ -205,3 +205,93 @@ class TestUserFacingStringsNameRealCommands:
                 if self._verdict(phrase.split()) is False:
                     bad.append(f"{py.relative_to(src.parent.parent)}: 'mgit {phrase}'")
         assert not bad, "user-facing text names commands that do not exist:\n" + "\n".join(bad)
+
+
+class TestEphemeralWorkspaceRefused:
+    """A workspace under /tmp holds the only copy of its own working memory.
+
+    One was created in an agent's scratchpad; /tmp was swept, and the journal
+    and memory.toml of a live feature went with it. The commits survived only
+    because they had been pushed. `init` now refuses the trap by default.
+    """
+
+    def _invoke_entry(self, monkeypatch, capsys, args):
+        import sys as _sys
+
+        from mgit.cli import cli
+
+        monkeypatch.setattr(_sys, "argv", ["mgit", *args])
+        code = 0
+        try:
+            cli()
+        except SystemExit as e:
+            code = e.code if e.code is not None else 0
+        captured = capsys.readouterr()
+        return code, captured.out, captured.err
+
+    def test_init_under_tmp_exits_2_and_writes_nothing(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.delenv("MGIT_ALLOW_EPHEMERAL")
+        monkeypatch.chdir(tmp_path)
+        code, _, err = self._invoke_entry(monkeypatch, capsys, ["init"])
+        assert code == 2
+        assert "reaps" in err
+        assert not (tmp_path / ".mgit").exists()
+        assert not (tmp_path / "AGENT.md").exists()
+
+    def test_the_refusal_names_the_memory_it_is_protecting(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.delenv("MGIT_ALLOW_EPHEMERAL")
+        monkeypatch.chdir(tmp_path)
+        _, _, err = self._invoke_entry(monkeypatch, capsys, ["init"])
+        assert "journal.jsonl" in err
+        assert "--allow-ephemeral" in err
+
+    def test_named_workspace_under_tmp_is_refused_before_the_dir_is_made(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.delenv("MGIT_ALLOW_EPHEMERAL")
+        monkeypatch.chdir(tmp_path)
+        code, _, _ = self._invoke_entry(monkeypatch, capsys, ["init", "slab"])
+        assert code == 2
+        assert not (tmp_path / "slab").exists()
+
+    def test_the_flag_is_the_escape_hatch(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.delenv("MGIT_ALLOW_EPHEMERAL")
+        monkeypatch.chdir(tmp_path)
+        code, _, _ = self._invoke_entry(
+            monkeypatch, capsys, ["init", "--no-interactive", "--allow-ephemeral"]
+        )
+        assert code == 0
+        assert (tmp_path / ".mgit").is_dir()
+
+    def test_the_env_var_is_the_escape_hatch_for_test_and_e2e_sandboxes(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.setenv("MGIT_ALLOW_EPHEMERAL", "1")
+        monkeypatch.chdir(tmp_path)
+        code, _, _ = self._invoke_entry(monkeypatch, capsys, ["init", "--no-interactive"])
+        assert code == 0
+        assert (tmp_path / ".mgit").is_dir()
+
+    def test_env_var_set_to_zero_does_not_allow(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("MGIT_ALLOW_EPHEMERAL", "0")
+        monkeypatch.chdir(tmp_path)
+        code, _, _ = self._invoke_entry(monkeypatch, capsys, ["init", "--no-interactive"])
+        assert code == 2
+
+    def test_a_durable_path_is_not_ephemeral(self):
+        import pathlib
+
+        from mgit.core.workspace import ephemeral_root
+
+        repo = pathlib.Path(__file__).resolve().parent.parent
+        assert ephemeral_root(repo) is None
+
+    def test_tmp_itself_and_its_children_are_ephemeral(self, tmp_path):
+        import pathlib
+
+        from mgit.core.workspace import ephemeral_root
+
+        assert ephemeral_root(pathlib.Path("/tmp")) == pathlib.Path("/tmp").resolve()
+        assert ephemeral_root(tmp_path) is not None
+        # the path need not exist yet: init checks before it creates
+        assert ephemeral_root(tmp_path / "not-created-yet") is not None

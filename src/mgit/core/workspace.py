@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 from mgit.core import config, git
@@ -20,6 +21,33 @@ WORKTREES_DIR = "worktrees"
 CHECKPOINTS_DIR = "checkpoints"
 SKILLS_DIR = "skills"
 ACTIVE_FILE = "active"
+
+# Roots whose contents the OS is free to delete. `tempfile.gettempdir()` is read
+# at call time so TMPDIR is honoured.
+_EPHEMERAL_ROOTS = ("/tmp", "/var/tmp", "/dev/shm")
+
+
+def ephemeral_root(path: Path) -> Path | None:
+    """The temp root `path` lives under, or None.
+
+    A workspace's `.mgit/` holds the only copy of every feature's working memory
+    — `memory.toml` and `journal.jsonl` are written nowhere else. Under a temp
+    root the OS reaps them, and memory that was built to outlive a context
+    window fails to outlive a reboot.
+    """
+    candidates = {Path(tempfile.gettempdir()), *(Path(p) for p in _EPHEMERAL_ROOTS)}
+    try:
+        resolved = path.resolve()
+    except OSError:  # pragma: no cover - unreadable parent
+        return None
+    for candidate in candidates:
+        try:
+            root = candidate.resolve()
+        except OSError:  # pragma: no cover - absent on this platform
+            continue
+        if resolved == root or resolved.is_relative_to(root):
+            return root
+    return None
 
 # AGENTS.md is a shared standard: frameworks (Next.js) and users write to it too.
 # mgit owns only what lies between these markers, so tools can coexist in one file.

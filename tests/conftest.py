@@ -5,6 +5,16 @@ import subprocess
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def allow_ephemeral_workspaces(monkeypatch):
+    """Every workspace here is built under pytest's tmp_path, i.e. under /tmp.
+
+    `mgit init` refuses that by default. Tests that exercise the refusal itself
+    delete this variable.
+    """
+    monkeypatch.setenv("MGIT_ALLOW_EPHEMERAL", "1")
+
+
 @pytest.fixture
 def tmp_workspace(tmp_path):
     """Create a temporary directory to use as a workspace."""

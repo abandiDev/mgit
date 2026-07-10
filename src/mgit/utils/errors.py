@@ -13,6 +13,10 @@ class WorkspaceExistsError(MgitError):
     """A workspace already exists at this location."""
 
 
+class EphemeralWorkspaceError(MgitError):
+    """The workspace root is under a temp dir the OS will reap."""
+
+
 class RepoNotFoundError(MgitError):
     """Referenced repo is not registered in the workspace."""
 

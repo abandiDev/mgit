@@ -50,6 +50,11 @@ mgit repo list
 #   shared-lib      ~/my-project/shared-lib
 ```
 
+Pick a durable directory. `.mgit/` holds the only copy of every feature's
+working memory, so `mgit init` refuses a workspace under `/tmp` (or `TMPDIR`):
+a tmp sweep would take the journal with it. Pass `--allow-ephemeral`, or set
+`MGIT_ALLOW_EPHEMERAL=1`, when the workspace really is throwaway.
+
 ### 2. Start a feature
 
 ```bash
