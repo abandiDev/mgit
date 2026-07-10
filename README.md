@@ -223,17 +223,25 @@ mgit skill doctor                     # active / drafts / parked backlog
 Nothing reaches an agent unreviewed. A candidate is **dropped** if the distiller
 classifies it a one-off, **parked** if it is a first-occurrence prose lesson (the
 n=2 rule — it must recur to earn a draft), and promoted to a **draft** only when
-it recurs, states an explicit rule, updates an existing skill, or ships a
-`verify_command`. Drafts go live only via `mgit skill approve`; `mgit skill
-reject` tombstones a slug so it is never proposed again. Approved skills are
-advertised in the ambient brief that every worktree session already loads.
+it recurs, updates an existing skill, or rests on a journal entry you recorded as
+a `convention`. Drafts go live only via `mgit skill approve`; `mgit skill reject`
+tombstones a slug so it is never proposed again. Approved skills are advertised
+in the ambient brief that every worktree session already loads.
+
+A rule is **declared, not detected**: `mgit feature note --type convention` is how
+you say "this is a standing rule", and it is the only thing that says so. mgit
+resolves every quote in a candidate back to the journal entry it came from, so
+the entry's recorded type — not the distiller's opinion of its wording — decides.
+Recurrence is measured the same way: against the journal as it stood when the
+lesson was parked, so re-running `distill` over an unchanged journal can never
+promote its own backlog.
 
 Distillation shells out to the `claude` CLI in headless mode (configurable under
 `[skills]` in `.mgit/config.toml`), and journal text is scrubbed for secret
 shapes before it leaves the machine.
 
 A skill's `verify_command` says the skill is **checkable**; it says nothing about
-whether the lesson is **durable**. Only recurrence, an evidence-backed rule, or
+whether the lesson is **durable**. Only recurrence, a recorded `convention`, or
 an amendment to an existing skill gets a candidate past the n=2 rule — a command
 never does, because `test -f vitest.config.ts` is runnable, tautological, and
 silent about the lesson it claims to verify.

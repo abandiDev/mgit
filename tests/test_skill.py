@@ -29,13 +29,27 @@ def _candidate(**over):
         "verify_command": None,
         "concrete_example": "",
         "evidence": [{"quote": "no, run the seed script first", "kind": "decision"}],
-        "explicit_rule": False,
         "recurrence_of": None,
         "updates_existing_skill": None,
         "watched_paths": [],
     }
     c.update(over)
     return c
+
+
+def _convention(**over):
+    """A candidate resting on a journal entry mgit recorded as a `convention`.
+
+    Grounding stamps `recorded_type`, and the gate reads only that. The quote
+    carries no never/always/must: the recorded type is what makes it a rule.
+    """
+    evidence = [{
+        "quote": "Seed the database before the e2e suite runs.",
+        "kind": "note",                   # the distiller's echo — wrong, and ignored
+        "recorded_type": "convention",    # what mgit read off its own journal
+        "recorded_key": "seedconv",
+    }]
+    return _candidate(evidence=evidence, **over)
 
 
 def _feature_with_journal(ws, name="feat-x", entries=None):
@@ -106,19 +120,123 @@ def test_gate_prose_first_occurrence_parks(initialized_workspace):
     assert action == "park"
 
 
-def test_gate_explicit_rule_drafts(initialized_workspace):
+def test_gate_recorded_convention_drafts(initialized_workspace):
     ws = initialized_workspace
-    # explicit_rule only counts when a verbatim quote states the rule
-    candidate = _candidate(explicit_rule=True, evidence=[{"quote": "always run the seed script first, no exceptions", "kind": "decision"}])
-    action, _ = skill.route_candidate(ws, candidate, [], SkillConfig(), ["f"])
+    action, _ = skill.route_candidate(ws, _convention(), [], SkillConfig(), ["f"])
     assert action == "draft"
     assert (ws.skills_dir / "drafts" / "seed-before-e2e" / "SKILL.md").is_file()
+
+
+def test_gate_ignores_rule_language_in_prose(initialized_workspace):
+    """A rule is declared, not detected.
+
+    The regex this replaces read "opposite twin edges do not bow apart" and "the
+    first repaint always saw a mismatch" -- a defect and a bug, both described,
+    neither a law -- as standing rules, and scored one hit in three across a real
+    journal. Wording earns nothing now; only the recorded type does.
+    """
+    ws = initialized_workspace
+    for quote in [
+        "snapshot() must never throw on user values",
+        "always run tsc before committing, no exceptions",
+        "do not commit on a green vitest alone",
+        "Hard rule for src/engine/: capture visible() first",
+    ]:
+        candidate = _candidate(
+            slug="prose-lesson", evidence=[{"quote": quote, "kind": "decision"}]
+        )
+        skill.ground_evidence(candidate, [{"feature": "f", "type": "decision", "text": quote}])
+        action, detail = skill.route_candidate(ws, candidate, [], SkillConfig(), ["f"])
+        assert action == "park", f"{quote!r} bought a draft on its first occurrence: {detail}"
+
+
+class TestEvidenceIsGroundedInTheJournal:
+    """The recorded journal type, not the distiller's echo of it, decides.
+
+    `convention` was absent from the evidence-kind enum while journals could
+    record one, so every convention came back mislabelled `decision` -- not a
+    model error, a schema one. Fixtures never saw it because they all quote
+    `always ... no exceptions`, which the old regex admitted whatever the type.
+    """
+
+    CONVENTION = (
+        "Converting a renderer is not verified by its unit tests. Compare rendered "
+        "geometry against the old renderer at the same trace step; a comparison "
+        "that finds no figure should fail loudly, not pass vacuously."
+    )
+
+    def test_convention_without_rule_language_still_drafts(self, initialized_workspace):
+        ws = initialized_workspace
+        events = [{"feature": "f", "type": "convention", "text": self.CONVENTION}]
+        candidate = _candidate(evidence=[{"quote": self.CONVENTION, "kind": "decision"}])
+        skill.ground_evidence(candidate, events)
+        action, _ = skill.route_candidate(ws, candidate, [], SkillConfig(), ["f"])
+        assert action == "draft"
+
+    def test_a_note_the_model_calls_a_convention_does_not_draft(self, initialized_workspace):
+        ws = initialized_workspace
+        prose = "Verified the port in a real browser; the screenshots matched."
+        events = [{"feature": "f", "type": "note", "text": prose}]
+        candidate = _candidate(evidence=[{"quote": prose, "kind": "convention"}])
+        skill.ground_evidence(candidate, events)
+        assert candidate["evidence"][0]["recorded_type"] == "note"
+        action, detail = skill.route_candidate(ws, candidate, [], SkillConfig(), ["f"])
+        assert action == "park", detail
+
+    def test_a_truncated_quote_still_resolves(self):
+        entry = self.CONVENTION + " Markup legitimately changes shape."
+        events = [{"feature": "f", "type": "convention", "text": entry}]
+        # Models quote the opening sentences of a long entry and stop.
+        candidate = _candidate(evidence=[{"quote": self.CONVENTION, "kind": "note"}])
+        skill.ground_evidence(candidate, events)
+        assert candidate["evidence"][0]["recorded_type"] == "convention"
+
+    def test_an_unquotable_paraphrase_grounds_to_nothing(self):
+        events = [{"feature": "f", "type": "convention", "text": self.CONVENTION}]
+        candidate = _candidate(evidence=[{"quote": "compare the geometry", "kind": "convention"}])
+        skill.ground_evidence(candidate, events)
+        assert candidate["evidence"][0]["recorded_type"] is None
+
+    def test_provenance_prints_the_recorded_type(self, initialized_workspace):
+        ws = initialized_workspace
+        events = [{"feature": "f", "type": "convention", "text": self.CONVENTION}]
+        candidate = _candidate(evidence=[{"quote": self.CONVENTION, "kind": "decision"}])
+        skill.ground_evidence(candidate, events)
+        draft = skill.render_draft(ws, candidate, features=["f"])
+        body = (draft / "SKILL.md").read_text()
+        assert f"> [convention] {self.CONVENTION}" in body
+        assert "> [decision]" not in body
+
+    def test_convention_is_a_legal_evidence_kind(self):
+        props = skill.CANDIDATES_SCHEMA["properties"]["candidates"]["items"]["properties"]
+        assert "convention" in props["evidence"]["items"]["properties"]["kind"]["enum"]
+
+
+def test_two_distill_runs_over_one_journal_leave_the_lesson_parked(initialized_workspace):
+    """End to end: `mgit skill distill` twice must not promote its own backlog."""
+    ws = initialized_workspace
+    prose = "The playground preloads code via the lz-string #code= hash, not the Monaco model."
+    name = _feature_with_journal(ws, entries=[(prose, "note")])
+    _stub_claude(ws, {"candidates": [_candidate(
+        slug="preloading-playground-code",
+        evidence=[{"quote": prose, "kind": "note"}],
+    )]})
+
+    first = SkillManager(ws).distill()
+    assert "park" in first[0], first
+    second = SkillManager(ws).distill()
+    assert "park" in second[0], f"n=2 satisfied by re-running the command: {second}"
+    assert not (ws.skills_dir / "drafts" / "preloading-playground-code").exists()
+    # One row, and it records the journal it was measured against.
+    rows = skill._read_jsonl(skill._parked_path(ws))
+    assert len(rows) == 1 and rows[0]["journal_keys"] == [skill._evidence_key(prose)]
+    assert name
 
 
 def test_gate_invalid_slug_dropped(initialized_workspace):
     ws = initialized_workspace
     action, detail = skill.route_candidate(
-        ws, _candidate(slug="../../../../evil", explicit_rule=True), [], SkillConfig(), ["f"]
+        ws, _convention(slug="../../../../evil"), [], SkillConfig(), ["f"]
     )
     assert action == "drop" and "invalid slug" in detail
     assert not (ws.skills_dir / "active" / "evil").exists()
@@ -137,7 +255,7 @@ def test_verify_command_not_executed_by_default(initialized_workspace, tmp_path)
     marker = tmp_path / "pwned"
     action, _ = skill.route_candidate(
         ws,
-        _candidate(verify_command=f"touch {marker}", explicit_rule=True, evidence=[{"quote": "always run the seed script first, no exceptions", "kind": "decision"}]),
+        _convention(verify_command=f"touch {marker}"),
         [],
         SkillConfig(),
         ["f"],
@@ -152,7 +270,7 @@ def test_verify_command_not_executed_by_default(initialized_workspace, tmp_path)
 def test_verify_command_runs_when_opted_in(initialized_workspace):
     ws = initialized_workspace
     cfg = SkillConfig(allow_auto_verify=True)
-    candidate = _candidate(verify_command="true", explicit_rule=True, evidence=[{"quote": "always run the seed script first, no exceptions", "kind": "decision"}])
+    candidate = _convention(verify_command="true")
     action, _ = skill.route_candidate(ws, candidate, [], cfg, ["f"])
     assert action == "draft"
     meta = skill.read_meta(ws.skills_dir / "drafts" / "seed-before-e2e")
@@ -163,7 +281,7 @@ def test_verify_command_runs_when_opted_in(initialized_workspace):
 def test_verify_fail_parks_when_opted_in(initialized_workspace):
     ws = initialized_workspace
     cfg = SkillConfig(allow_auto_verify=True)
-    candidate = _candidate(verify_command="false", explicit_rule=True, evidence=[{"quote": "always run the seed script first, no exceptions", "kind": "decision"}])
+    candidate = _convention(verify_command="false")
     action, detail = skill.route_candidate(ws, candidate, [], cfg, ["f"])
     assert action == "park" and "verify_command failed" in detail
 
@@ -178,15 +296,72 @@ def test_park_candidate_merges_instead_of_duplicating(initialized_workspace):
     assert len(rows) == 1
 
 
+FIRST_SEEN = "no, run the seed script first"
+ALSO_THERE = "the seeder is idempotent, so re-running it is cheap"
+WRITTEN_LATER = "the e2e suite went red again; the database had never been seeded"
+
+# The journal when the lesson was parked, and after the developer worked on.
+AT_PARK_TIME = [
+    {"feature": "f", "type": "decision", "text": FIRST_SEEN},
+    {"feature": "f", "type": "note", "text": ALSO_THERE},
+]
+LATER = [*AT_PARK_TIME, {"feature": "f", "type": "note", "text": WRITTEN_LATER}]
+
+
+def _parked(ws, events, slug="seed-before-e2e"):
+    skill._append_jsonl(skill._parked_path(ws), {
+        "id": slug, "status": "parked", "created": memory.utc_now(),
+        "journal_keys": sorted(skill.journal_corpus(events)),
+    })
+    return skill._read_jsonl(skill._parked_path(ws))
+
+
 def test_recurrence_promotes_and_resolves_parked(initialized_workspace):
     ws = initialized_workspace
-    skill._append_jsonl(skill._parked_path(ws), {
-        "id": "seed-before-e2e", "status": "parked", "created": memory.utc_now()
-    })
-    parked = skill._read_jsonl(skill._parked_path(ws))
-    action, _ = skill.route_candidate(ws, _candidate(), parked, SkillConfig(), ["f"])
+    parked = _parked(ws, AT_PARK_TIME)
+    # A true second occurrence: it rests on an entry written after the parking.
+    candidate = _candidate(evidence=[{"quote": WRITTEN_LATER, "kind": "note"}])
+    skill.ground_evidence(candidate, LATER)
+    action, _ = skill.route_candidate(ws, candidate, parked, SkillConfig(), ["f"])
     assert action == "draft"
     assert skill._read_jsonl(skill._parked_path(ws))[0]["status"] == "resolved"
+
+
+def test_requoting_a_different_slice_of_an_unchanged_journal_is_not_a_recurrence(
+    initialized_workspace,
+):
+    """The baseline is the journal, not the quotes the distiller last chose.
+
+    Measured against its own last citation, a candidate that simply swaps one
+    quote for another entry already in the journal reads as a fresh occurrence
+    of a lesson that nothing repeated.
+    """
+    ws = initialized_workspace
+    parked = _parked(ws, AT_PARK_TIME)
+    candidate = _candidate(evidence=[{"quote": ALSO_THERE, "kind": "note"}])
+    skill.ground_evidence(candidate, AT_PARK_TIME)
+    assert skill.evidence_keys(candidate), "quote must have grounded"
+    action, detail = skill.route_candidate(ws, candidate, parked, SkillConfig(), ["f"])
+    assert action == "park", detail
+    assert skill._read_jsonl(skill._parked_path(ws))[0]["status"] == "parked"
+
+
+def test_a_row_parked_before_baselines_existed_re_parks_rather_than_promotes(
+    initialized_workspace,
+):
+    ws = initialized_workspace
+    skill._append_jsonl(skill._parked_path(ws), {
+        "id": "seed-before-e2e", "status": "parked", "created": memory.utc_now(),
+    })
+    parked = skill._read_jsonl(skill._parked_path(ws))
+    candidate = _candidate(evidence=[{"quote": FIRST_SEEN, "kind": "decision"}])
+    skill.ground_evidence(candidate, AT_PARK_TIME)
+    action, _ = skill.route_candidate(ws, candidate, parked, SkillConfig(), ["f"])
+    assert action == "park"
+    # It records its baseline on the way through, and is judged normally after.
+    skill.park_candidate(ws, candidate, "prose", journal_keys=skill.journal_corpus(AT_PARK_TIME))
+    row = skill._read_jsonl(skill._parked_path(ws))[0]
+    assert row["journal_keys"] == sorted(skill.journal_corpus(AT_PARK_TIME))
 
 
 # --- review -----------------------------------------------------------------
@@ -194,7 +369,7 @@ def test_recurrence_promotes_and_resolves_parked(initialized_workspace):
 def test_approve_activates_and_updates_ambient_brief(initialized_workspace):
     ws = initialized_workspace
     name = _feature_with_journal(ws)
-    skill.render_draft(ws, _candidate(explicit_rule=True, evidence=[{"quote": "always run the seed script first, no exceptions", "kind": "decision"}]), features=[name])
+    skill.render_draft(ws, _convention(), features=[name])
     dest = SkillManager(ws).approve("seed-before-e2e")
     assert dest == ws.skills_dir / "active" / "seed-before-e2e"
     assert skill.read_meta(dest)["status"] == "active"
@@ -221,7 +396,7 @@ def test_approve_amends_named_skill_not_a_sibling(initialized_workspace):
 
 def test_reject_tombstones_and_removes_draft(initialized_workspace):
     ws = initialized_workspace
-    skill.render_draft(ws, _candidate(explicit_rule=True), features=["f"])
+    skill.render_draft(ws, _candidate(), features=["f"])
     SkillManager(ws).reject("seed-before-e2e", "too specific")
     assert not (ws.skills_dir / "drafts" / "seed-before-e2e").exists()
     tomb = skill._read_jsonl(skill._tombstones_path(ws))
@@ -238,15 +413,14 @@ def test_approve_missing_draft_raises(initialized_workspace):
 
 def test_distill_end_to_end_with_stub(initialized_workspace):
     ws = initialized_workspace
-    _feature_with_journal(ws)
+    rule = "Seed the database before the e2e suite runs."
+    _feature_with_journal(ws, entries=[(rule, "convention"), ("the seeder is slow", "note")])
     _stub_claude(ws, {"candidates": [
-        _candidate(
-            slug="keep-me",
-            explicit_rule=True,
-            evidence=[{"quote": "never skip the seed script", "kind": "decision"}],
-        ),
+        # Drafts because the entry it quotes was recorded as a convention...
+        _candidate(slug="keep-me", evidence=[{"quote": rule, "kind": "note"}]),
         _candidate(slug="drop-me", kind="one-off"),
-        _candidate(slug="park-me"),
+        # ...and this one parks, because a `note` is not a rule.
+        _candidate(slug="park-me", evidence=[{"quote": "the seeder is slow", "kind": "note"}]),
     ]})
     results = SkillManager(ws).distill()
     joined = "\n".join(results)
@@ -591,7 +765,6 @@ class TestVerifyCommandDoesNotRoute:
             "anti_triggers": ["never"],
             "steps": ["s"],
             "evidence": [{"quote": "q", "kind": "note"}],
-            "explicit_rule": False,
             "recurrence_of": None,
             "updates_existing_skill": None,
         }
@@ -621,18 +794,27 @@ class TestVerifyCommandDoesNotRoute:
         from mgit.core.skill import SkillConfig, route_candidate
 
         ws = initialized_workspace
-        parked = [{"id": "prose-lesson", "status": "parked"}]
-        candidate = self._candidate(verify_command="npx tsc --noEmit")
+        parked = [{"id": "prose-lesson", "status": "parked", "journal_keys": ["oldentry"]}]
+        candidate = self._candidate(
+            verify_command="npx tsc --noEmit",
+            evidence=[{"quote": "q", "kind": "note", "recorded_key": "newentry"}],
+        )
         action, _ = route_candidate(ws, candidate, parked, SkillConfig(), ["feat"])
         assert action == "draft"
 
 
-class TestExplicitRuleMustRestOnEvidence:
-    """`explicit_rule` exempts a candidate from the n=2 rule. It is the model's
-    own claim about its evidence, and across five live distills the model set it
-    for design rationales -- eight candidates, none ever parked."""
+class TestARuleIsDeclaredNotDetected:
+    """Only a recorded `convention` exempts a first occurrence from the n=2 rule.
 
-    def _candidate(self, quotes, **over):
+    mgit used to ask the distiller (`explicit_rule`) and check the answer by
+    grepping the quote for never/always/must. The model set the flag on eight
+    consecutive design rationales, and over a real journal the regex scored one
+    hit in three -- reading a described defect and a described bug as laws, while
+    the entry it got right had already been typed a `convention`. Both are gone:
+    the schema no longer carries the claim, and nothing reads the prose.
+    """
+
+    def _candidate(self, quotes, recorded="note", **over):
         c = {
             "slug": "some-lesson",
             "kind": "durable-convention",
@@ -640,8 +822,10 @@ class TestExplicitRuleMustRestOnEvidence:
             "trigger_description": "t",
             "anti_triggers": ["never do x"],  # anti_triggers must not count
             "steps": ["s"],
-            "evidence": [{"quote": q, "kind": "note"} for q in quotes],
-            "explicit_rule": True,
+            "evidence": [
+                {"quote": q, "kind": "note", "recorded_type": recorded, "recorded_key": f"k{i}"}
+                for i, q in enumerate(quotes)
+            ],
             "recurrence_of": None,
             "updates_existing_skill": None,
             "verify_command": None,
@@ -649,7 +833,7 @@ class TestExplicitRuleMustRestOnEvidence:
         c.update(over)
         return c
 
-    def test_rationale_without_rule_language_parks(self, initialized_workspace):
+    def test_rationale_parks(self, initialized_workspace):
         from mgit.core.skill import SkillConfig, route_candidate
 
         ws = initialized_workspace
@@ -658,9 +842,8 @@ class TestExplicitRuleMustRestOnEvidence:
         )
         action, detail = route_candidate(ws, candidate, [], SkillConfig(), ["feat"])
         assert action == "park", detail
-        assert candidate["explicit_rule"] is False
 
-    def test_a_real_stated_rule_still_drafts(self, initialized_workspace):
+    def test_rule_language_in_a_note_buys_nothing(self, initialized_workspace):
         from mgit.core.skill import SkillConfig, route_candidate
 
         ws = initialized_workspace
@@ -668,12 +851,25 @@ class TestExplicitRuleMustRestOnEvidence:
             "snapshot() must never throw on user values",
             "Hard rule for src/engine/: capture visible() first",
             "always run tsc before committing, no exceptions",
-            "do not commit on a green vitest alone",
+            "opposite twin edges do not bow apart",       # the false positive that started this
+            "the first repaint always saw a mismatch",    # ...and its twin
         ]:
-            candidate = self._candidate([quote])
+            candidate = self._candidate([quote], recorded="note")
             action, _ = route_candidate(ws, candidate, [], SkillConfig(), ["feat"])
-            assert action == "draft", quote
-            assert candidate["explicit_rule"] is True
+            assert action == "park", quote
+
+    def test_the_same_prose_recorded_as_a_convention_drafts(self, initialized_workspace):
+        from mgit.core.skill import SkillConfig, route_candidate
+
+        ws = initialized_workspace
+        candidate = self._candidate(["capture visible() first"], recorded="convention")
+        action, _ = route_candidate(ws, candidate, [], SkillConfig(), ["feat"])
+        assert action == "draft"
+
+    def test_the_schema_no_longer_accepts_explicit_rule(self):
+        props = skill.CANDIDATES_SCHEMA["properties"]["candidates"]["items"]
+        assert "explicit_rule" not in props["properties"]
+        assert props["additionalProperties"] is False, "so the model cannot smuggle it back"
 
     def test_anti_triggers_do_not_count_as_evidence_of_a_rule(self, initialized_workspace):
         from mgit.core.skill import SkillConfig, route_candidate

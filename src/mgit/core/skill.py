@@ -23,6 +23,7 @@ single flushed appends and temp+os.replace swaps, not flock.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import re
 import shutil
@@ -148,13 +149,17 @@ CANDIDATES_SCHEMA: dict = {
                                     "type": "string",
                                     "description": "VERBATIM quote from the journal evidence",
                                 },
-                                "kind": {"enum": ["note", "decision", "handoff", "question"]},
+                                "kind": {
+                                    "enum": [
+                                        "note",
+                                        "decision",
+                                        "convention",
+                                        "handoff",
+                                        "question",
+                                    ]
+                                },
                             },
                         },
-                    },
-                    "explicit_rule": {
-                        "type": "boolean",
-                        "description": "true when the developer stated an explicit never/always rule",
                     },
                     "recurrence_of": {
                         "type": ["string", "null"],
@@ -510,8 +515,11 @@ def render_skill_md(candidate: dict, features: list[str]) -> str:
     for ev in candidate.get("evidence") or []:
         quote = redact.scrub(str(ev.get("quote", ""))).strip()
         if quote:
+            # The journal's own word for the entry, when the quote resolved to
+            # one. Provenance that renames a convention is not provenance.
+            kind = ev.get("recorded_type") or ev.get("kind") or "evidence"
             lines.append("")
-            lines.append(f"> [{ev.get('kind', 'evidence')}] {quote}")
+            lines.append(f"> [{kind}] {quote}")
     return "\n".join(lines) + "\n"
 
 
@@ -601,22 +609,104 @@ def render_draft(ws: Workspace, candidate: dict, features: list[str]) -> Path:
 _PLACEHOLDER_RE = re.compile(r"(?<!\$)\{[a-zA-Z][a-zA-Z0-9]*(?:[-_][a-zA-Z0-9]+)+\}")
 
 
-# The schema defines explicit_rule as "the developer stated an explicit
-# never/always rule". A model will set it for any confidently-worded lesson, so
-# the claim is checked against the verbatim evidence it is supposed to rest on.
-_RULE_LANGUAGE_RE = re.compile(
-    r"\b(never|always|must|mandatory|required)\b"
-    r"|\bhard rule\b|\bno exceptions?\b|\bdo not\b|\bdon't\b|\bunder no circumstances\b",
-    re.IGNORECASE,
-)
+def _normalized(text: object) -> str:
+    return " ".join(str(text).split())
 
 
-def evidence_states_a_rule(candidate: dict) -> bool:
-    """True when a verbatim evidence quote actually states a never/always rule."""
+def _evidence_key(entry_text: str) -> str:
+    """A stable id for one journal entry, independent of how it was quoted."""
+    return hashlib.sha256(_normalized(entry_text).encode("utf-8")).hexdigest()[:16]
+
+
+def ground_evidence(candidate: dict, events: list[dict]) -> dict:
+    """Resolve each evidence quote back to the journal entry it came from.
+
+    Stamps two fields mgit derives itself and the distiller cannot forge:
+    `recorded_type` (the journal's own word for the entry) and `recorded_key`
+    (which entry it was). Both were previously taken on trust from the model's
+    echoed `kind`, which cannot be right: `convention` was missing from the
+    schema's enum for as long as journals could record one, so a convention came
+    back labelled `decision` every time -- not a model error, a schema one.
+
+    Quotes are required to be verbatim, so this is a lookup rather than a guess.
+    Match on containment: a model legitimately quotes the opening sentences of a
+    long entry and stops. A quote that resolves to nothing was not verbatim, and
+    grounds to nothing -- it can support no gate.
+
+    Works on any dict carrying an `evidence` list: candidates and parked rows.
+    """
+    recorded = [(_normalized(e["text"]), e["type"]) for e in events]
     for item in candidate.get("evidence") or []:
-        if _RULE_LANGUAGE_RE.search(str(item.get("quote", ""))):
-            return True
-    return False
+        quote = _normalized(item.get("quote", ""))
+        item["recorded_type"] = None
+        item["recorded_key"] = None
+        if not quote:
+            continue
+        for text, kind in recorded:
+            if quote in text:
+                item["recorded_type"] = kind
+                item["recorded_key"] = _evidence_key(text)
+                break
+    return candidate
+
+
+def evidence_keys(holder: dict) -> set[str]:
+    """The journal entries a candidate or parked row actually rests on.
+
+    Ungrounded quotes contribute nothing, so a candidate that cites no real
+    journal text has no evidence at all — which is the honest answer.
+    """
+    return {
+        str(item["recorded_key"])
+        for item in holder.get("evidence") or []
+        if item.get("recorded_key")
+    }
+
+
+def journal_corpus(events: list[dict]) -> set[str]:
+    """Every journal entry the distiller was shown, as keys."""
+    return {_evidence_key(str(e["text"])) for e in events}
+
+
+def is_second_occurrence(candidate: dict, parked_row: dict) -> bool:
+    """True when the lesson has been seen again since it was parked.
+
+    The baseline is the journal as it stood at park time, NOT the quotes the
+    distiller happened to cite then. Every run re-reads the whole journal, and
+    the model freely re-quotes a different subset of it; measured against its
+    own last citation, `moving-viz-nodes-only-from-the-timeline` swapped one of
+    two quotes and read as a fresh occurrence of a lesson nothing had repeated.
+
+    A row parked before this baseline existed cannot answer the question, so it
+    is not a recurrence -- it re-parks once, records its baseline, and is
+    judged properly from then on.
+    """
+    baseline = parked_row.get("journal_keys")
+    if baseline is None:
+        return False
+    return bool(evidence_keys(candidate) - {str(k) for k in baseline})
+
+
+def evidence_records_a_convention(candidate: dict) -> bool:
+    """True when a quote resolves to a journal entry recorded as a `convention`.
+
+    A rule is DECLARED, not detected. Writing a `convention` is how the
+    developer states a standing rule, and it is the only thing that says so.
+
+    mgit used to ask the distiller (`explicit_rule`) and then check the answer by
+    grepping the quote for never/always/must. The model set the flag on eight
+    consecutive design rationales, and over this workspace's own journal the
+    regex scored one hit in three: it read "opposite twin edges `do not` bow
+    apart" and "the first repaint `always` saw a mismatch" as standing rules,
+    while the one entry it got right had already been typed a `convention`.
+    Prose that describes a defect is not prose that states a law.
+
+    Only `recorded_type` counts, never the model's `kind`: mgit stamps the
+    former from its own journal, so this cannot be talked past.
+    """
+    return any(
+        item.get("recorded_type") == "convention" for item in candidate.get("evidence") or []
+    )
 
 
 def runnable_verify(command: str | None) -> str | None:
@@ -788,29 +878,38 @@ def route_candidate(
     if kind == "personal-preference":
         candidate["scope_level"] = "global"
 
-    parked_ids = {p["id"] for p in parked if p.get("status") != "resolved"}
+    parked_rows = {p["id"]: p for p in parked if p.get("status") != "resolved"}
     recurrence = candidate.get("recurrence_of")
-    is_recurrence = bool(recurrence and recurrence in parked_ids) or slug in parked_ids
+    if recurrence and recurrence in parked_rows:
+        parked_id: str | None = str(recurrence)
+    elif slug in parked_rows:
+        parked_id = slug
+    else:
+        parked_id = None
+    # The n=2 rule counts occurrences of the LESSON, not runs of the distiller.
+    # Every run re-reads the whole journal and re-proposes what it parked last
+    # time, so matching the parked id alone let `mgit skill distill` twice over
+    # an unchanged journal promote its own backlog.
+    is_recurrence = bool(parked_id) and is_second_occurrence(candidate, parked_rows[parked_id])
 
     # A placeholder command is not a verification. Drop it so nothing downstream
     # tries to run `cd {project-root}`.
     candidate["verify_command"] = runnable_verify(candidate.get("verify_command"))
     verify_cmd = candidate["verify_command"]
-    # explicit_rule is the model's own claim about the evidence. Believe it only
-    # when a verbatim quote bears it out; otherwise a confidently-phrased design
-    # rationale walks straight past the n=2 rule.
-    explicit = bool(candidate.get("explicit_rule")) and evidence_states_a_rule(candidate)
-    candidate["explicit_rule"] = explicit
     # A verify_command says the skill is CHECKABLE. The n=2 rule asks whether the
     # lesson is DURABLE. Those are different questions, and treating the first as
     # an answer to the second let `test -f vitest.config.ts && test -d
     # node_modules/vitest` — runnable, tautological, silent about the lesson —
     # draft a first-occurrence observation. Durability is decided here; the
     # command is still carried onto the draft and gated at approve time.
+    #
+    # Three things, and only three, buy a first occurrence past the n=2 rule: it
+    # amends a skill that already exists, it has recurred, or its author wrote it
+    # down as a `convention`. Nothing is inferred from how the prose is worded.
     should_draft = (
         bool(candidate.get("updates_existing_skill"))
         or is_recurrence
-        or explicit
+        or evidence_records_a_convention(candidate)
     )
     if not should_draft:
         return "park", "prose lesson, first occurrence (n=2 rule)"
@@ -839,7 +938,7 @@ def route_candidate(
             verified_at=memory.utc_now() if verified else None,
         )
     if is_recurrence:
-        resolved_id = recurrence if recurrence in parked_ids else slug
+        resolved_id = parked_id
 
         def _resolve(rows: list[dict]) -> list[dict]:
             for p in rows:
@@ -852,13 +951,19 @@ def route_candidate(
     return "draft", str(draft_dir)
 
 
-def park_candidate(ws: Workspace, candidate: dict, note: str) -> None:
+def park_candidate(
+    ws: Workspace, candidate: dict, note: str, journal_keys: set[str] | None = None
+) -> None:
     slug = candidate.get("slug", "unnamed")
+    # The journal as it stood when this lesson was last seen. A later candidate
+    # earns its second occurrence only by citing an entry written after this.
+    baseline = sorted(journal_keys) if journal_keys is not None else None
     row = {
         "id": slug,
         "created": memory.utc_now(),
         "note": note,
         "status": "parked",
+        "journal_keys": baseline,
         **{
             k: candidate.get(k)
             for k in ("title", "trigger_description", "scope_level", "paths", "steps",
@@ -872,6 +977,8 @@ def park_candidate(ws: Workspace, candidate: dict, note: str) -> None:
             if existing.get("id") == slug and existing.get("status") != "resolved":
                 existing["note"] = note
                 existing["last_seen"] = memory.utc_now()
+                if baseline is not None:
+                    existing["journal_keys"] = baseline
                 return rows
         rows.append(row)
         return rows
@@ -972,11 +1079,13 @@ class SkillManager:
                             "candidates": len(candidates)})
         results: list[str] = []
         # Re-read parked per candidate so recurrence resolution within one run is seen.
+        corpus = journal_corpus(events)
         for candidate in candidates:
             parked = _read_jsonl(_parked_path(ws))
+            ground_evidence(candidate, events)
             action, detail = route_candidate(ws, candidate, parked, cfg, scope_features)
             if action == "park":
-                park_candidate(ws, candidate, detail)
+                park_candidate(ws, candidate, detail, journal_keys=corpus)
             _ledger_append(ws, {"type": action, "slug": candidate.get("slug"),
                                 "detail": detail[:300]})
             results.append(f"{candidate.get('slug')}: {action} ({detail[:120]})")
