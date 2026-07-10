@@ -477,27 +477,41 @@ def test_cli_skill_reject_missing_exits_2(initialized_workspace, monkeypatch, ca
 class TestBuildDescription:
     """The description is what the ambient brief shows every session."""
 
-    def test_situation_clause_anti_trigger_takes_the_prefix(self):
+    def test_situation_clause_anti_trigger_reads_as_a_sentence(self):
         desc = skill.build_description({
             "trigger_description": "Before publishing a feature.",
             "anti_triggers": ["the repo has no pytest suite."],
         })
-        assert desc.endswith("Do not use when the repo has no pytest suite.")
+        assert desc.endswith("Not for: the repo has no pytest suite.")
 
-    def test_imperative_anti_trigger_is_not_double_prefixed(self):
+    @pytest.mark.parametrize("anti", [
+        "The renderer is brand new — there is no old implementation to diff against.",
+        "A brand-new renderer with no prior implementation on main to compare against.",
+    ])
+    def test_capitalised_clauses_and_noun_phrases_survive(self, anti):
+        """Both shipped from live runs as "Do not use when The renderer..." and
+        as a sentence with no verb. A colon accepts every form the model uses."""
+        desc = skill.build_description({
+            "trigger_description": "Porting a renderer.", "anti_triggers": [anti],
+        })
+        assert "Do not use when The" not in desc
+        assert "Do not use when A" not in desc
+        assert desc.endswith(f"Not for: {anti.rstrip('.')}.")
+
+    def test_imperative_anti_trigger_is_not_double_negated(self):
         # Verbatim from a live distiller run; the schema asks for a situation
         # clause but models answer with an imperative.
         desc = skill.build_description({
             "trigger_description": "Before publishing a feature.",
             "anti_triggers": ["Do not expand this into running the suite on every commit."],
         })
-        assert "Do not use when Do not" not in desc
+        assert "Not for: do not" not in desc.lower()
         assert desc.endswith("Do not expand this into running the suite on every commit.")
 
     @pytest.mark.parametrize("anti", ["Never publish on red.", "Don't do it.", "Avoid this."])
     def test_other_imperative_forms(self, anti):
         desc = skill.build_description({"trigger_description": "T.", "anti_triggers": [anti]})
-        assert "Do not use when" not in desc
+        assert "Not for:" not in desc
 
     def test_empty_anti_trigger_adds_no_dangling_clause(self):
         desc = skill.build_description({"trigger_description": "T.", "anti_triggers": [""]})
@@ -506,6 +520,63 @@ class TestBuildDescription:
     def test_description_is_truncated(self):
         desc = skill.build_description({"trigger_description": "x" * 2000, "anti_triggers": []})
         assert len(desc) <= skill.MAX_DESCRIPTION_CHARS
+
+    def test_the_procedure_is_dropped_from_the_trigger(self):
+        """Verbatim from the live draft: 541 chars, of which 278 were the steps."""
+        trigger = (
+            "Use when converting, porting or rewriting a viz renderer/painter under "
+            "LeetSketch2/src/viz-engine (TreeRenderer, GraphRenderer, CallTreeRenderer -> "
+            "Scene/paintSvg) and the change is supposed to be behaviour-preserving. "
+            "Unit tests pass while the picture is wrong. "
+            "Drive the demo route (/algo/bst-insert, /algo/dijkstra) in a real browser "
+            "(Playwright), capture getBoundingClientRect + getComputedStyle plus the "
+            "geometry attributes (transform, d, x, y, r, stroke-width), and diff against "
+            "the old renderer running on main at the same trace step."
+        )
+        desc = skill.build_description({"trigger_description": trigger, "anti_triggers": []})
+        assert desc.endswith("Unit tests pass while the picture is wrong.")
+        assert "getBoundingClientRect" not in desc, "the procedure belongs in `steps`"
+        assert len(desc) <= skill.MAX_TRIGGER_CHARS
+
+    def test_a_single_overlong_sentence_is_cut_not_dropped(self):
+        desc = skill.build_description({"trigger_description": "y " * 400, "anti_triggers": []})
+        assert desc.endswith("…") and len(desc) <= skill.MAX_TRIGGER_CHARS
+
+    def test_whole_sentences_only(self):
+        trigger = "One. Two. " + "z" * 400
+        desc = skill.build_description({"trigger_description": trigger, "anti_triggers": []})
+        assert desc == "One. Two."
+
+
+class TestDraftsDedupeAgainstThemselves:
+    """A lesson awaiting review must not be re-proposed under a new slug.
+
+    Only `scan_active` fed the deduplication context, so three runs over one
+    journal left three draft directories for a single lesson -- while parked
+    ids, which the prompt did show, came back reused verbatim every time.
+    """
+
+    def test_the_prompt_names_drafts_awaiting_review(self, initialized_workspace):
+        ws = initialized_workspace
+        skill.render_draft(ws, _convention(slug="already-drafted"), features=["f"])
+        prompt = skill.build_prompt(
+            [{"feature": "f", "type": "note", "text": "t"}], [], [], [], skill.list_drafts(ws)
+        )
+        assert "already-drafted" in prompt
+        assert "do NOT propose it again" in prompt
+
+    def test_distill_shows_the_distiller_its_own_drafts(self, initialized_workspace):
+        ws = initialized_workspace
+        _feature_with_journal(ws)
+        skill.render_draft(ws, _convention(slug="already-drafted"), features=["f"])
+        _stub_claude(ws, {"candidates": []})
+        SkillManager(ws).distill()
+        prompt = SkillManager(ws).distill(dry_run=True)[1]
+        assert "already-drafted" in prompt
+
+    def test_no_drafts_renders_none(self):
+        prompt = skill.build_prompt([{"feature": "f", "type": "note", "text": "t"}], [], [], [])
+        assert "awaiting human review" in prompt
 
 
 class TestEvidenceTypesAreWritable:

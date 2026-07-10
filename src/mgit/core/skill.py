@@ -53,6 +53,12 @@ SKILL_MD = "SKILL.md"
 # only *requests* to constrain — so it is re-validated in Python before any use.
 VALID_SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{2,60}$")
 MAX_DESCRIPTION_CHARS = 1024
+# The trigger routes; it does not teach. A distiller packs the whole procedure
+# into it — one live candidate spent 278 of its 541 characters restating steps
+# that `steps` already held — and the ambient brief re-reads all of it, in every
+# worktree, every session. Keep the sentences that say WHEN; drop the HOW.
+MAX_TRIGGER_CHARS = 300
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
 # An anti-trigger written as an imperative rather than a situation clause.
 _IMPERATIVE_ANTI_RE = re.compile(r"^(do not|don't|never|avoid)\b", re.IGNORECASE)
@@ -113,15 +119,21 @@ CANDIDATES_SCHEMA: dict = {
                     "title": {"type": "string"},
                     "trigger_description": {
                         "type": "string",
+                        "maxLength": 400,
                         "description": (
-                            "retrieval-optimized: concrete commands, error strings, repo/file "
-                            "names; state both what it does and when to use it"
+                            "one or two sentences saying WHEN to reach for this and what it "
+                            "is about — retrieval bait: concrete commands, error strings, "
+                            "repo/file names. Never the procedure; that is what `steps` is "
+                            "for. This is re-read in every session's brief."
                         ),
                     },
                     "anti_triggers": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "situations where this skill must NOT be applied",
+                        "description": (
+                            "situations where this skill must NOT be applied, each a short "
+                            "clause or noun phrase, e.g. 'the repo has no pytest suite'"
+                        ),
                     },
                     "preconditions": {"type": "array", "items": {"type": "string"}},
                     "steps": {
@@ -399,6 +411,9 @@ PROMPT_TEMPLATE = """You are mgit's skill distiller. Below are steering signals 
 Existing skills (propose updates_existing_skill with the skill name instead of a duplicate):
 {skills_block}
 
+Already distilled from these same journals and awaiting human review. The lesson is captured — do NOT propose it again, neither under its slug nor a new one:
+{drafts_block}
+
 Parked observations from earlier runs (if a lesson here is the same one, set recurrence_of to its id):
 {parked_block}
 
@@ -422,6 +437,11 @@ def _skills_block(skills: list[SkillInfo]) -> str:
     return "\n".join(lines) or "(none yet)"
 
 
+def _drafts_block(drafts: list[SkillInfo]) -> str:
+    lines = [f"- {s.slug}: {s.description[:200]}" for s in drafts]
+    return "\n".join(lines) or "(none)"
+
+
 def _parked_block(parked: list[dict]) -> str:
     lines = [
         f"- id={p['id']}: {p.get('title', '')} — {p.get('trigger_description', '')[:200]}"
@@ -441,10 +461,12 @@ def build_prompt(
     skills: list[SkillInfo],
     parked: list[dict],
     tombstones: list[dict],
+    drafts: list[SkillInfo] | None = None,
 ) -> str:
     return PROMPT_TEMPLATE.format(
         events_block=_events_block(events),
         skills_block=_skills_block(skills),
+        drafts_block=_drafts_block(drafts or []),
         parked_block=_parked_block(parked),
         tombstones_block=_tombstones_block(tombstones),
     )
@@ -465,22 +487,44 @@ def _frontmatter(name: str, description: str, paths: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _trim_to_sentences(text: object, budget: int) -> str:
+    """The whole sentences of `text` that fit in `budget`; at least the first."""
+    flat = " ".join(str(text).split())
+    if len(flat) <= budget:
+        return flat
+    kept = ""
+    for sentence in _SENTENCE_SPLIT_RE.split(flat):
+        candidate = f"{kept} {sentence}".strip()
+        if kept and len(candidate) > budget:
+            break
+        kept = candidate
+        if len(kept) >= budget:
+            break
+    if len(kept) > budget:
+        kept = kept[: budget - 1].rstrip() + "…"
+    return kept
+
+
 def build_description(candidate: dict) -> str:
-    desc = str(candidate.get("trigger_description", "")).strip()
+    desc = _trim_to_sentences(candidate.get("trigger_description", ""), MAX_TRIGGER_CHARS)
     if candidate.get("scope_level") == "feature" and candidate.get("paths"):
         desc += f" Use when working under {', '.join(candidate['paths'])}."
     anti = candidate.get("anti_triggers") or []
     if anti:
         first = str(anti[0]).strip().rstrip(".")
-        # The schema asks for a situation clause ("the repo has no pytest suite"),
-        # which takes the prefix. Models routinely answer with an imperative
-        # instead ("Do not expand this to every commit") — prefixing that yields
-        # "Do not use when Do not expand...". Imperatives stand as their own
-        # sentence; this string is what the ambient brief shows every session.
+        # The schema asks for a situation clause ("the repo has no pytest suite").
+        # Models answer with whatever they please: an imperative ("Do not expand
+        # this to every commit"), a capitalised clause ("The renderer is brand
+        # new"), or a bare noun phrase ("A brand-new renderer with no prior
+        # implementation"). "Do not use when " fits only the first form, and only
+        # in lower case; on the other two it shipped "Do not use when The
+        # renderer..." and a sentence carrying no verb at all. A colon takes all
+        # three. Imperatives still stand alone — "Not for: do not expand" negates
+        # twice. This string is what the ambient brief shows every session.
         if _IMPERATIVE_ANTI_RE.match(first):
             desc += f" {first}."
         elif first:
-            desc += f" Do not use when {first}."
+            desc += f" Not for: {first}."
     if len(desc) > MAX_DESCRIPTION_CHARS:
         desc = desc[: MAX_DESCRIPTION_CHARS - 1] + "…"
     return desc
@@ -1058,9 +1102,14 @@ class SkillManager:
             return [f"no durable steering found in {scope}; nothing to distill"]
         scope_features = sorted({e["feature"] for e in events})
         existing = scan_active(ws)
+        # Drafts dedupe too. Only ACTIVE skills were ever shown, so a lesson
+        # already sitting in the review queue was re-proposed every run under a
+        # freshly invented slug — three runs, three draft directories, one
+        # lesson. Parked ids were shown, and their slugs came back verbatim.
+        pending = list_drafts(ws)
         parked = _read_jsonl(_parked_path(ws))
         tombstones = _read_jsonl(_tombstones_path(ws))
-        prompt = build_prompt(events, existing, parked, tombstones)
+        prompt = build_prompt(events, existing, parked, tombstones, pending)
         if dry_run:
             return ["--- dry-run distiller prompt ---", prompt]
 
